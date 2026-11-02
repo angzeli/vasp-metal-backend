@@ -10,6 +10,7 @@
 #include <stdatomic.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 typedef void (*zgemm_fn)(const char *, const char *, const int *, const int *,
                          const int *, const double *, const double *, const int *,
@@ -25,6 +26,8 @@ static struct {
 } cfg;
 
 static _Atomic uint64_t stats[VMB_NSTAT];
+/* zgemm_ calls by decade of m*n*k, and time in the GPU attempt / CPU path. */
+static _Atomic uint64_t work_hist[16], try_ns, cpu_ns;
 static double max_check_ratio;  /* guarded by gpu_lock */
 static pthread_mutex_t gpu_lock = PTHREAD_MUTEX_INITIALIZER;
 static pthread_once_t init_once = PTHREAD_ONCE_INIT;
@@ -316,6 +319,9 @@ void zgemm_(const char *transa, const char *transb, const int *m, const int *n,
 {
     pthread_once(&init_once, init);
     stats[VMB_STAT_CALLS]++;
+    double work = (double)*m * *n * *k;
+    work_hist[work < 10.0 ? 0 : (int)fmin(15.0, floor(log10(work)))]++;
+    uint64_t t0 = clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
     int status;
     if (cfg.enabled) {
         status = vmb_zgemm_try(*transa, *transb, *m, *n, *k, alpha, a, *lda, b, *ldb,
@@ -324,10 +330,13 @@ void zgemm_(const char *transa, const char *transb, const int *m, const int *n,
         status = VMB_DECLINED_DISABLED;
         stats[VMB_STAT_REASON_BASE + status]++;
     }
+    uint64_t t1 = clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
+    try_ns += t1 - t0;
     if (status != VMB_OK) {
         stats[VMB_STAT_CPU_CALLS]++;
         cpu_zgemm(transa, transb, m, n, k, alpha, a, lda, b, ldb, beta, c, ldc,
                   len_transa, len_transb);
+        cpu_ns += clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - t1;
     }
 }
 
@@ -350,6 +359,9 @@ void vmb_stats_reset(void)
     pthread_mutex_lock(&gpu_lock);
     for (int i = 0; i < VMB_NSTAT; i++)
         stats[i] = 0;
+    for (int i = 0; i < 16; i++)
+        work_hist[i] = 0;
+    try_ns = cpu_ns = 0;
     max_check_ratio = 0.0;
     pthread_mutex_unlock(&gpu_lock);
 }
@@ -383,4 +395,8 @@ void vmb_report(FILE *out)
         fprintf(out, "vmb.status.%s=%llu\n", status_names[s],
                 (unsigned long long)stats[VMB_STAT_REASON_BASE + s]);
     fprintf(out, "vmb.max_check_ratio=%.6e\n", max_check_ratio);
+    fprintf(out, "vmb.try_seconds=%.6f\nvmb.cpu_seconds=%.6f\n", try_ns * 1e-9, cpu_ns * 1e-9);
+    for (int b = 0; b < 16; b++)
+        if (work_hist[b])
+            fprintf(out, "vmb.calls_work_1e%d=%llu\n", b, (unsigned long long)work_hist[b]);
 }
