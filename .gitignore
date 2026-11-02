@@ -1,0 +1,40 @@
+# Private staging, licensed inputs and local-only material
+private/
+scratch/
+POTCAR*
+*.potcar
+
+# Build products and binaries
+build/
+bin/
+*.o
+*.a
+*.dylib
+*.mod
+*.metallib
+*.air
+vasp
+vasp_std
+vasp_gam
+vasp_ncl
+
+# Logs and calculation outputs
+*.log
+OUTCAR
+OSZICAR
+CONTCAR
+WAVECAR
+CHGCAR
+CHG
+EIGENVAL
+DOSCAR
+IBZKPT
+PCDAT
+XDATCAR
+PROCAR
+REPORT
+vasprun.xml
+vaspout.h5
+
+# OS noise
+.DS_Store
