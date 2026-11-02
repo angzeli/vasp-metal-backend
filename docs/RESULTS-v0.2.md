@@ -1,9 +1,11 @@
 # v0.2 results (branch `v0.2-dev`)
 
-**Status:** v0.2 is a safety and measurement release. **The v0.2 build is not
-VASP-verified.** No VASP launch was made for v0.2. The only VASP-verified
-integration is v0.1 (`d3be811`, see [RESULTS-v0.1.md](RESULTS-v0.1.md)). No
-speedup claim is made for VASP.
+**Status:** v0.2 is a safety and measurement release. **The v0.2 build is
+VASP-verified for correctness and dispatch** on the 2-atom Si static PBE
+fixture (section 6). With the v0.2 build in force mode, all 802 ZGEMM calls
+were computed on the GPU and their results were used, with no change to the
+SCF. No speedup claim is made for VASP. v0.1 (`d3be811`) results are in
+[RESULTS-v0.1.md](RESULTS-v0.1.md).
 
 ## Hardware and host state
 
@@ -182,7 +184,7 @@ allowed only one optimization.
 - `scripts/run_si2.py --backend off|auto|force [--telemetry]`; `on` remains an
   alias for `force`.
 
-## 5. Private relink and a future integration run
+## 5. Private relink
 
 The v0.2 library relinks against the existing VASP 6.6.1 std objects with the
 same script:
@@ -190,26 +192,93 @@ same script:
 - an empty link log;
 - every reference global symbol present, with only backend symbols added.
 
-That is a link check only.
+The binary used in section 6 is `private/relink-v0.2-20261102-125116`. It was
+linked from the library at `fd8f98d`; library sources are unchanged since.
 
 ```sh
 make -j1 all test
 scripts/relink-vasp.sh /path/to/vasp/build/std private/relink-v0.2-NEW
 ```
 
-To verify the v0.2 build, make a new explicit integration run. The v0.1 ledger
-already holds its two launches, so this needs a new ledger and a fresh
-authorization:
+## 6. VASP integration run (v0.2 build)
+
+Two sequential launches, authorized explicitly, used a new ledger
+(`private/launch-ledger-v0.2.txt`, now holding its two entries) and the same
+Si2 inputs as v0.1 (ENCUT 300, 2×2×2 Γ mesh, EDIFF 1e-6):
+- 1 MPI rank (synthetic-topology OpenMPI), one OpenMP/BLAS thread,
+  NCORE = KPAR = 1;
+- 60 s hard timeout, no retries.
+
+The first attempt was refused by the default memory gate (WARN pressure,
+load average about 185 while an unrelated archive job ran). Both launches then
+used the user-authorized `--allow-warn-pressure` override. Pressure was WARN
+(38 to 44% free, never critical) before, between and after them; the separate
+8-rank job kept running and was only observed.
+
+| | Backend off | Force, `VMB_CHECK=1`, telemetry |
+| --- | --- | --- |
+| Exit / termination | 0 / normal | 0 / normal |
+| SCF | converged (EDIFF reached), 12 iterations | converged (EDIFF reached), 12 iterations |
+| Final TOTEN, eV | −8.28298469 | −8.28298469 |
+| ZGEMM calls | 802 (all OpenBLAS, mode off) | 802 |
+| GPU submitted / completed / consumed | 0 / 0 / 0 | **802 / 802 / 802** |
+| Range fallbacks, CPU calls | 0, 802 | **0**, 0 |
+| Shadow check | — | 802 checked, 0 failures, worst err/tol 4.39e-2 |
+| VASP elapsed, s | 0.296 | 1.468 |
+
+- |ΔTOTEN| / N_atoms = 0 at OUTCAR precision. The largest per-iteration energy
+  difference in OSZICAR is 4.2e-10 eV.
+- Maximum force-component difference: 0 eV/Å. Both forces are zero by symmetry
+  here, so this carries no information.
+- `scripts/compare_runs.py` verdict: **VASP-verified**. All of its checks
+  passed: normal exits, convergence, finite and complete forces, matched
+  inputs, consistent counters, and no shadow failures.
+- The safety envelope declined none of VASP's calls (`range` = 0). The worst
+  shadow-check ratio equals v0.1's to the printed digits.
+- No performance claim: the forced GPU path is slower here. Its time includes
+  the shadow check and one cold first call of 0.44 s (Metal device creation and
+  runtime kernel compilation inside the VASP process).
+
+### First observed ZGEMM shapes (telemetry, Si2)
+
+These are **observed** shapes from this run: dimension metadata only, without
+values or addresses. They are not the synthetic `si2-bin` shapes of section 3.
+- 802 calls fall into 35 distinct (trans, m, n, k) combinations, with 8 distinct
+  leading-dimension triples. beta = 1 in 730 calls and beta = 0 in 72.
+- Every call is CN or NN. m·n·k ranges from 1,024 to 149,760, and k is at most
+  476. The decade counts match v0.1 (339 / 419 / 44).
+
+| op | m×n×k | calls |
+| --- | --- | --- |
+| CN | 8×8×16 | 127 |
+| NN | 16×8×8 | 88 |
+| CN | 8×8×468 | 62 |
+| CN | 8×8×476 | 51 |
+| CN | 8×8×459 | 50 |
+| NN | 468×8×8 | 37 |
+| CN | 16×8×16 | 36 |
+| CN | 24×8×16 | 35 |
+
+Every observed shape is at least 100× below the work of the smallest synthetic
+shape that the GPU won (about 1e7). Even the unshipped candidate auto rule
+(m·n ≥ 16384) would select none of them. For this system, `auto` correctly
+serves everything on the CPU.
+
+### Commands used
 
 ```sh
-python3 scripts/run_si2.py --binary private/relink-v0.2-NEW/vasp_std_vmb \
+python3 scripts/run_si2.py --binary private/relink-v0.2-20261102-125116/vasp_std_vmb \
   --fixture "$SI2_FIXTURE" --output private/si2-v0.2-off \
-  --ledger private/launch-ledger-v0.2.txt --backend off
-python3 scripts/run_si2.py --binary private/relink-v0.2-NEW/vasp_std_vmb \
+  --ledger private/launch-ledger-v0.2.txt --backend off --allow-warn-pressure
+python3 scripts/run_si2.py --binary private/relink-v0.2-20261102-125116/vasp_std_vmb \
   --fixture "$SI2_FIXTURE" --output private/si2-v0.2-force \
-  --ledger private/launch-ledger-v0.2.txt --backend force --check --telemetry
+  --ledger private/launch-ledger-v0.2.txt --backend force --check --telemetry \
+  --allow-warn-pressure
 python3 scripts/compare_runs.py private/si2-v0.2-off private/si2-v0.2-force
 ```
+
+`--allow-warn-pressure` was used only because it was explicitly authorized for
+this pair. A future run should leave it out unless it is authorized again.
 
 ## Tested ranges
 
@@ -228,17 +297,20 @@ python3 scripts/compare_runs.py private/si2-v0.2-off private/si2-v0.2-force
 - All timing was exploratory, on a busy host, with one CPU thread as the
   baseline. A multi-rank VASP run would share one GPU across ranks; that
   contention was not measured.
-- Only synthetic shapes were timed; real VASP shape traces have not yet been
-  collected with the new telemetry.
+- VASP verification covers one tiny system on one rank, with zero forces by
+  symmetry. Real shapes are known only for that system; the benchmarked large
+  shapes remain synthetic.
 - The envelope is conservative. Operands with a very large dynamic range fall
   back even when a per-row or per-column scaling could have served them.
 
 ## Next decision
 
-1. Authorize a new two-launch Si2 integration run of the v0.2 build (off vs
-   force with shadow check and telemetry). This would make v0.2 VASP-verified
-   and give the first real ZGEMM shape telemetry.
-2. Repeat the benchmark on a quiet host. Ship the candidate auto rule only if
-   it reproduces there, select and holdout alike.
-3. Only if real shapes fall in the losing long-k region: a tiled or
-   k-split kernel as the next single optimization.
+1. Collect telemetry from a larger, representative system (off mode, CPU
+   only) to learn whether any real ZGEMM shapes reach the region where the GPU
+   won (m·n·k ≥ about 1e7). If none do, the GPU path has no use case for these
+   workloads, whatever the kernel speed.
+2. If some do: repeat the benchmark on a quiet host using those shapes, and ship
+   an auto rule only if it reproduces, select and holdout alike.
+3. Only after that: a tiled or k-split kernel, or batching several small calls
+   into one submission. Batching would need explicit cross-call design and was
+   out of scope here.

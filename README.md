@@ -17,7 +17,7 @@ licensed VASP objects are relinked privately and never leave the local machine.
 | --- | --- | --- |
 | Standalone correctness | verified | verified, with a safety envelope and fail-closed checks |
 | Private relink | verified | verified (link only) |
-| VASP integration | **verified** on Si2: 802/802 GPU results consumed, same TOTEN | **not verified**: no VASP launch yet |
+| VASP integration | **verified** on Si2: 802/802 GPU results consumed, same TOTEN | **verified** on Si2: 802/802 consumed, 0 shadow failures, 0 range fallbacks, same TOTEN |
 | Performance claim | none | none for VASP; exploratory synthetic benchmarks only |
 
 - **Correctness is not speedup.** The verified Si2 integration shows that GPU
@@ -33,6 +33,9 @@ licensed VASP objects are relinked privately and never leave the local machine.
   OpenBLAS by 1.2 to 3.4× for synthetic shapes with m·n·k ≥ about 1.5e7. It was
   10 to 100× slower for Si2-sized shapes, because each call carries about
   0.25 ms of submit/sync latency. No auto rule is shipped from this data.
+- **Real shapes are small.** Telemetry from the v0.2 Si2 run shows that every
+  ZGEMM has m·n·k ≤ 1.5e5, at least 100× below the region where the GPU won.
+  `auto` therefore keeps all of them on the CPU.
 - Details: [docs/RESULTS-v0.1.md](docs/RESULTS-v0.1.md),
   [docs/RESULTS-v0.2.md](docs/RESULTS-v0.2.md). Default mode is off.
 
@@ -141,8 +144,8 @@ Repeated GPU calls are bitwise deterministic.
 
 ## Limitations
 
-- One operation (ZGEMM). VASP is tested on one tiny system with one rank only,
-  and only for v0.1. `VMB_REPORT` and `VMB_TELEMETRY` are not rank-aware.
+- One operation (ZGEMM). VASP is tested on one tiny system (Si2) with one
+  rank only. `VMB_REPORT` and `VMB_TELEMETRY` are not rank-aware.
 - Float-float arithmetic is not IEEE FP64; see the tolerance policy. The range
   envelope is conservative.
 - Timing so far is exploratory: busy host, single-thread CPU baseline,
