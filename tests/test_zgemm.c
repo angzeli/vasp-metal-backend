@@ -38,7 +38,7 @@ static double value(enum kind kind)
     switch (kind) {
     case WIDE: return urand() * pow(10.0, 30.0 * urand());
     case TINY: return urand() * 1e-150;
-    case HUGE_VALS: return urand() * 1e150;
+    case HUGE_VALS: return urand() * 1e120;
     default: return urand();
     }
 }
@@ -132,8 +132,11 @@ static void gpu_compare(const char *label, char ta, char tb, int m, int n, int k
             const double *g = cg.v + 2 * ((size_t)i + (size_t)j * cg.ld);
             const double *r = cr.v + 2 * ((size_t)i + (size_t)j * cr.ld);
             double err = hypot(g[0] - r[0], g[1] - r[1]), sij = s[i + (size_t)j * m];
-            double q = err / (VMB_ATOL(smax) + VMB_RTOL(k) * sij);
-            if (!(q <= ratio))
+            double tol = VMB_ATOL(smax) + VMB_RTOL(k) * sij;
+            double q = err == 0.0 ? 0.0 : tol > 0.0 ? err / tol : INFINITY;
+            if (isnan(q) || isnan(ratio))  /* sticky: NaN/inf are never cleared */
+                ratio = NAN;
+            else if (q > ratio)
                 ratio = q;
             max_abs = fmax(max_abs, err);
             if (sij > 0)
@@ -279,6 +282,260 @@ static void latency_info(void)
     free(c.v);
 }
 
+/* ---- v0.2: fail-closed tolerance, numerical-safety envelope, modes ---- */
+
+void vmb_telemetry_write(const char *path);  /* internal; exercised below */
+
+static void ratio_unit(const char *label, size_t count, const double *got, const double *ref,
+                       const double *scale, int expect_pass, double expect_value)
+{
+    double r = vmb_tolerance_ratio(count, got, ref, scale, 4);
+    int pass = r <= 1.0;
+    cases++;
+    expect(pass == expect_pass, label, "tolerance verdict");
+    if (expect_value >= 0.0)
+        expect(r == expect_value, label, "tolerance value");
+    printf("%-28s ratio=%.3e -> %s\n", label, r, pass ? "pass" : "fail closed");
+}
+
+static void tolerance_units(void)
+{
+    const double z[4] = {0, 0, 0, 0};
+    ratio_unit("tol: exact, zero tol", 2, z, z, (double[]){0, 0}, 1, 0.0);
+    ratio_unit("tol: err>0, zero tol", 1, (double[]){1e-300, 0}, z, (double[]){0}, 0, -1);
+    ratio_unit("tol: zero-tol fail sticky", 2, (double[]){1e-300, 0, 1, 0},
+               (double[]){0, 0, 1, 0}, (double[]){0, 0}, 0, -1);
+    ratio_unit("tol: NaN got sticky", 2, (double[]){NAN, 0, 1, 0}, (double[]){0, 0, 1, 0},
+               (double[]){1, 1}, 0, -1);
+    ratio_unit("tol: NaN ref", 1, (double[]){1, 0}, (double[]){NAN, 0}, (double[]){1}, 0, -1);
+    ratio_unit("tol: inf scale", 1, (double[]){1, 0}, (double[]){1, 0}, (double[]){INFINITY}, 0, -1);
+    ratio_unit("tol: NaN scale", 1, (double[]){1, 0}, (double[]){1, 0}, (double[]){NAN}, 0, -1);
+    ratio_unit("tol: negative scale", 1, (double[]){1, 0}, (double[]){1, 0}, (double[]){-1}, 0, -1);
+    ratio_unit("tol: difference overflow", 1, (double[]){1e308, 0}, (double[]){-1e308, 0},
+               (double[]){1e308}, 0, -1);
+    ratio_unit("tol: big then small err", 2, (double[]){2, 0, 1, 0}, (double[]){1, 0, 1, 0},
+               (double[]){1, 1}, 0, -1);
+    ratio_unit("tol: small err passes", 1, (double[]){1 + 0x1p-50, 0}, (double[]){1, 0},
+               (double[]){1}, 1, -1);
+}
+
+enum { ACCURATE_OR_RANGE, MUST_RANGE, MUST_GPU };
+
+/* Forced attempt with the shadow check off. Either the GPU result is consumed
+   and accurate against the oracle, or a counted range fallback ran OpenBLAS
+   exactly once with a bit-identical result. */
+static void safety_case(const char *label, int want, char ta, char tb, int m, int n, int k,
+                        const double alpha[2], struct mat *a, struct mat *b,
+                        const double beta[2], struct mat *c0)
+{
+    struct mat cg = mat_copy(c0), cc = mat_copy(c0), cr = mat_copy(c0);
+    double *s = malloc((size_t)m * n * sizeof *s), *got = malloc(16 * (size_t)m * n),
+           *ref = malloc(16 * (size_t)m * n);
+    uint64_t before[VMB_NSTAT], after[VMB_NSTAT];
+    vmb_stats_get(before);
+    call(ta, tb, m, n, k, alpha, a, b, beta, &cg, a->ld);
+    vmb_stats_get(after);
+    vmb_cpu_zgemm(ta, tb, m, n, k, alpha, a->v, a->ld, b->v, b->ld, beta, cc.v, cc.ld);
+#define D(i) (after[i] - before[i])
+    int consumed = D(VMB_STAT_CONSUMED) == 1;
+    cases++;
+    if (consumed) {
+        oracle_zgemm(ta, tb, m, n, k, alpha, a->v, a->ld, b->v, b->ld, beta, cr.v, cr.ld, s);
+        for (int j = 0; j < n; j++)
+            for (int i = 0; i < m; i++) {
+                memcpy(got + 2 * (i + (size_t)j * m), cg.v + 2 * (i + (size_t)j * cg.ld), 16);
+                memcpy(ref + 2 * (i + (size_t)j * m), cr.v + 2 * (i + (size_t)j * cr.ld), 16);
+            }
+        double r = vmb_tolerance_ratio((size_t)m * n, got, ref, s, k);
+        expect(want != MUST_RANGE, label, "GPU result consumed outside the envelope");
+        expect(r <= 1.0, label, "consumed GPU result inaccurate");
+        printf("%-28s GPU consumed, err/tol=%.3e\n", label, r);
+    } else {
+        expect(want != MUST_GPU, label, "envelope declined an ordinary-range call");
+        expect(D(VMB_STAT_REASON_BASE + VMB_DECLINED_RANGE) == 1, label, "not a range fallback");
+        expect(D(VMB_STAT_GPU_SUBMITTED) == 0, label, "GPU work submitted before declining");
+        expect(D(VMB_STAT_CPU_CALLS) == 1, label, "CPU path not taken exactly once");
+        expect(memcmp(cg.v, cc.v, mat_bytes(c0)) == 0, label, "result differs from OpenBLAS");
+        printf("%-28s range fallback, bitwise==OpenBLAS\n", label);
+    }
+#undef D
+    free(cg.v), free(cc.v), free(cr.v), free(s), free(got), free(ref);
+}
+
+/* Random sign and mantissa in [0.5, 1) times 2^e, e uniform in [lo, hi]. */
+static void fill_exp(struct mat *x, int lo, int hi)
+{
+    for (int j = 0; j < x->cols; j++)
+        for (int i = 0; i < x->rows; i++) {
+            double v[2];
+            for (int p = 0; p < 2; p++) {
+                int e = lo + (int)((urand() + 1.0) * 0.5 * (hi - lo + 1));
+                v[p] = ldexp(urand() < 0 ? -0.5 - 0.25 * (urand() + 1) : 0.5 + 0.25 * (urand() + 1),
+                             e > hi ? hi : e);
+            }
+            set_op(x, 'N', i, j, v[0], v[1]);
+        }
+}
+
+static void fill_zero(struct mat *x)
+{
+    for (int j = 0; j < x->cols; j++)
+        for (int i = 0; i < x->rows; i++)
+            set_op(x, 'N', i, j, 0.0, 0.0);
+}
+
+static void safety_cases(void)
+{
+    const double one[2] = {1, 0}, zero[2] = {0, 0}, some[2] = {0.5, -2};
+    struct mat a, b, c;
+
+    /* The d3be811 defect: exact result I, both diagonal products lost. */
+    a = mat_new(2, 2, 0), b = mat_new(2, 2, 0), c = mat_new(2, 2, 0);
+    fill_zero(&a), fill_zero(&b);
+    set_op(&a, 'N', 0, 0, 0x1p90, 0), set_op(&a, 'N', 1, 1, 0x1p-90, 0);
+    set_op(&b, 'N', 0, 0, 0x1p-90, 0), set_op(&b, 'N', 1, 1, 0x1p90, 0);
+    safety_case("safety: diag 2^+-90 2x2", ACCURATE_OR_RANGE, 'N', 'N', 2, 2, 2, one, &a, &b, zero, &c);
+    {   /* caller-visible result is exactly I; a direct try leaves C untouched */
+        struct mat cg = mat_copy(&c), ct = mat_copy(&c);
+        call('N', 'N', 2, 2, 2, one, &a, &b, zero, &cg, a.ld);
+        int st = vmb_zgemm_try('N', 'N', 2, 2, 2, one, a.v, a.ld, b.v, b.ld, zero, ct.v, ct.ld);
+        cases++;
+        expect(cg.v[0] == 1 && cg.v[6] == 1 && cg.v[1] == 0 && cg.v[2] == 0 && cg.v[4] == 0 &&
+               cg.v[7] == 0, "safety: diag result", "C != I");
+        expect(st == VMB_DECLINED_RANGE || st == VMB_OK, "safety: diag try", "unexpected status");
+        if (st != VMB_OK)
+            expect(memcmp(ct.v, c.v, mat_bytes(&c)) == 0, "safety: diag try", "partial write");
+        printf("%-28s zgemm_ C == I exactly; direct try status=%d, C untouched\n",
+               "safety: diag result", st);
+        free(cg.v), free(ct.v);
+    }
+    free(a.v), free(b.v), free(c.v);
+
+    /* The same pair embedded in an ordinary eligible 64x64x64 problem. */
+    a = mat_new(64, 64, 3), b = mat_new(64, 64, 1), c = mat_new(64, 64, 2);
+    fill(&a, RANDOM), fill(&b, RANDOM), fill(&c, RANDOM);
+    set_op(&a, 'N', 0, 0, 0x1p90, 0), set_op(&a, 'N', 1, 1, 0x1p-90, 0);
+    set_op(&b, 'N', 0, 0, 0x1p-90, 0), set_op(&b, 'N', 1, 1, 0x1p90, 0);
+    safety_case("safety: diag in 64^3", ACCURATE_OR_RANGE, 'N', 'N', 64, 64, 64, one, &a, &b, some, &c);
+    free(a.v), free(b.v), free(c.v);
+
+    /* Mixed scales: mild ranges must still reach the GPU; wide ones may not. */
+    a = mat_new(48, 40, 1), b = mat_new(40, 36, 2), c = mat_new(48, 36, 1);
+    fill_exp(&a, -10, 10), fill_exp(&b, -10, 10), fill_exp(&c, -10, 10);
+    safety_case("safety: mixed 2^+-10", MUST_GPU, 'N', 'N', 48, 36, 40, some, &a, &b, some, &c);
+    fill_exp(&a, -40, 40), fill_exp(&b, -40, 40);
+    safety_case("safety: mixed 2^+-40", ACCURATE_OR_RANGE, 'N', 'N', 48, 36, 40, some, &a, &b, zero, &c);
+    fill_exp(&a, -200, 200), fill_exp(&b, -200, 200);
+    safety_case("safety: mixed 2^+-200", ACCURATE_OR_RANGE, 'N', 'N', 48, 36, 40, some, &a, &b, zero, &c);
+    free(a.v), free(b.v), free(c.v);
+
+    /* Risky intermediate products: FP64 underflow, overflow, inf - inf. */
+    a = mat_new(8, 6, 0), b = mat_new(6, 5, 0), c = mat_new(8, 5, 0);
+    fill_exp(&a, -521, -519), fill_exp(&b, -521, -519);
+    safety_case("safety: products ~2^-1040", MUST_RANGE, 'N', 'N', 8, 5, 6, one, &a, &b, zero, &c);
+    fill_exp(&a, 519, 521), fill_exp(&b, 519, 521);
+    safety_case("safety: products overflow", MUST_RANGE, 'N', 'N', 8, 5, 6, one, &a, &b, zero, &c);
+    fill_zero(&a), fill_zero(&b);
+    set_op(&a, 'N', 0, 0, 0x1p600, 0), set_op(&a, 'N', 0, 1, 0x1p600, 0);
+    set_op(&b, 'N', 0, 0, 0x1p600, 0), set_op(&b, 'N', 1, 0, -0x1p600, 0);
+    safety_case("safety: inf - inf on CPU", MUST_RANGE, 'N', 'N', 8, 5, 6, one, &a, &b, zero, &c);
+    free(a.v), free(b.v), free(c.v);
+
+    /* beta*C scale imbalance in both directions. */
+    a = mat_new(24, 20, 1), b = mat_new(20, 16, 0), c = mat_new(24, 16, 1);
+    fill(&a, RANDOM), fill(&b, RANDOM);
+    fill_exp(&c, 299, 301);
+    safety_case("safety: beta*C ~2^300", ACCURATE_OR_RANGE, 'C', 'N', 16, 16, 20, one, &a, &b, some, &c);
+    fill_exp(&c, -301, -299);
+    safety_case("safety: beta*C ~2^-300", MUST_GPU, 'N', 'N', 24, 16, 20, one, &a, &b, some, &c);
+    fill_zero(&c);
+    set_op(&c, 'N', 0, 0, 0x1p200, 0);
+    safety_case("safety: one C elem 2^200", ACCURATE_OR_RANGE, 'N', 'N', 24, 16, 20, one, &a, &b, one, &c);
+    free(a.v), free(b.v), free(c.v);
+
+    /* Zero denominators: every S_ij is zero. */
+    a = mat_new(7, 5, 1), b = mat_new(5, 6, 1), c = mat_new(7, 6, 1);
+    fill_zero(&a), fill(&b, RANDOM);
+    safety_case("safety: A == 0 (S == 0)", ACCURATE_OR_RANGE, 'N', 'N', 7, 6, 5, one, &a, &b, zero, &c);
+    free(a.v), free(b.v), free(c.v);
+
+    /* In-process shadow check fails closed on a perturbed GPU result. */
+    set_env("VMB_CHECK", "1");
+    set_env("VMB_TEST_FAULT", "gpu_perturb");
+    fallback_case("shadow: perturbed GPU", VMB_FAILED_CHECK, 'N', 'C', 6, 5, 4, one, some, 0, 0, 1);
+    set_env("VMB_TEST_FAULT", NULL);
+    set_env("VMB_CHECK", NULL);
+}
+
+/* Route check through zgemm_: expected outcome counted once, result equal to
+   OpenBLAS whenever the CPU served the call. */
+static void mode_case(const char *label, int expect_status, int use_diag)
+{
+    const double one[2] = {1, 0}, zero[2] = {0, 0};
+    struct mat a = mat_new(9, 7, 1), b = mat_new(7, 8, 0), c = mat_new(9, 8, 1);
+    fill(&a, RANDOM), fill(&b, RANDOM), fill(&c, RANDOM);
+    if (use_diag) {
+        set_op(&a, 'N', 0, 0, 0x1p90, 0), set_op(&a, 'N', 1, 1, 0x1p-90, 0);
+        set_op(&b, 'N', 0, 0, 0x1p-90, 0), set_op(&b, 'N', 1, 1, 0x1p90, 0);
+    }
+    struct mat cg = mat_copy(&c), cc = mat_copy(&c);
+    uint64_t before[VMB_NSTAT], after[VMB_NSTAT];
+    vmb_stats_get(before);
+    call('N', 'N', 9, 8, 7, one, &a, &b, zero, &cg, a.ld);
+    vmb_stats_get(after);
+    vmb_cpu_zgemm('N', 'N', 9, 8, 7, one, a.v, a.ld, b.v, b.ld, zero, cc.v, cc.ld);
+    cases++;
+    expect(after[VMB_STAT_REASON_BASE + expect_status] - before[VMB_STAT_REASON_BASE + expect_status] == 1,
+           label, "unexpected outcome");
+    if (expect_status != VMB_OK)
+        expect(memcmp(cg.v, cc.v, mat_bytes(&c)) == 0, label, "CPU-served result differs");
+    printf("%-28s mode=%d outcome=%d as expected\n", label, vmb_mode(), expect_status);
+    free(a.v), free(b.v), free(c.v), free(cg.v), free(cc.v);
+}
+
+static void mode_cases(void)
+{
+    set_env("VMB_ENABLE", NULL);
+    set_env("VMB_MODE", "auto");
+    mode_case("mode: auto, no region", VMB_DECLINED_AUTO, 0);
+    set_env("VMB_TEST_AUTO_MIN_WORK", "0");
+    mode_case("mode: auto, test region", VMB_OK, 0);
+    mode_case("mode: auto cannot bypass", VMB_DECLINED_RANGE, 1);
+    set_env("VMB_TEST_AUTO_MIN_WORK", NULL);
+    set_env("VMB_MODE", "force");
+    mode_case("mode: force", VMB_OK, 0);
+    mode_case("mode: force cannot bypass", VMB_DECLINED_RANGE, 1);
+    set_env("VMB_MODE", "bogus");
+    mode_case("mode: unknown -> off", VMB_DECLINED_DISABLED, 0);
+    set_env("VMB_MODE", NULL);
+    mode_case("mode: default off", VMB_DECLINED_DISABLED, 0);
+    set_env("VMB_ENABLE", "1");
+    mode_case("mode: VMB_ENABLE=1 -> force", VMB_OK, 0);
+}
+
+static void telemetry_case(const char *path)
+{
+    vmb_telemetry_write(path);
+    FILE *in = fopen(path, "r");
+    char line[512];
+    int rows = 0, found = 0;
+    while (in && fgets(line, sizeof line, in)) {
+        if (line[0] == '#' || strncmp(line, "m\t", 2) == 0)
+            continue;
+        rows++;
+        /* mode_case shape: 9x8x7 N N lda=10 ldb=7 ldc=10 beta zero, status ok */
+        static const char key[] = "9\t8\t7\tN\tN\t10\t7\t10\tzero\t0\t";
+        if (strncmp(line, key, sizeof key - 1) == 0)
+            found = 1;
+    }
+    if (in)
+        fclose(in);
+    cases++;
+    expect(rows > 0 && found, "telemetry", "aggregated shape row missing");
+    printf("%-28s %d aggregated rows, known shape %s\n", "telemetry", rows,
+           found ? "present" : "MISSING");
+}
+
 int main(void)
 {
     static const double alphas[4][2] = {{1, 0}, {0.5, -2}, {-1.25, 0.75}, {0, 1}};
@@ -289,6 +546,8 @@ int main(void)
     static const char upper[] = "NTC", lower[] = "ntc";
     char label[64];
 
+    set_env("VMB_MODE", NULL);
+    set_env("VMB_TELEMETRY", "build/test-telemetry.tsv");
     set_env("VMB_ENABLE", "1");
     set_env("VMB_MIN_WORK", NULL);
     set_env("VMB_CHECK", NULL);
@@ -312,7 +571,7 @@ int main(void)
     gpu_case("wide-range 1e+-30 NN", 'N', 'N', 33, 17, 41, 1, alphas[2], betas[2], WIDE);
     gpu_case("wide-range 1e+-30 CT", 'C', 'T', 33, 17, 41, 2, alphas[1], betas[3], WIDE);
     gpu_case("tiny 1e-150", 'T', 'N', 20, 21, 22, 1, alphas[1], betas[2], TINY);
-    gpu_case("huge 1e+150", 'N', 'C', 20, 21, 22, 1, alphas[2], betas[1], HUGE_VALS);
+    gpu_case("huge 1e+120", 'N', 'C', 20, 21, 22, 1, alphas[2], betas[1], HUGE_VALS);
     cancel_case("cancellation NN", 'N', 'N', 19, 23, 64);
     cancel_case("cancellation CT", 'C', 'T', 19, 23, 64);
     cancel_case("cancellation TC", 'T', 'C', 7, 5, 200);
@@ -344,6 +603,10 @@ int main(void)
     fallback_case("fallback: disabled", VMB_DECLINED_DISABLED, 'N', 'N', 6, 5, 4, one, some, 0, 0, 0);
     set_env("VMB_ENABLE", "1");
 
+    tolerance_units();
+    safety_cases();
+    mode_cases();
+    telemetry_case("build/test-telemetry.tsv");
     latency_info();
     printf("\nworst err/tol over GPU cases: %.3e   worst max|err|/S: %.3e\n", worst_ratio, worst_rel);
     vmb_report(stdout);

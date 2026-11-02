@@ -1,4 +1,4 @@
-/* Policy, counters, fallback and the interposed zgemm_ entry point. */
+/* Policy, safety envelope, counters, fallback and the interposed zgemm_. */
 #define _DARWIN_C_SOURCE
 #include "vmb.h"
 #include "vmb_internal.h"
@@ -17,27 +17,55 @@ typedef void (*zgemm_fn)(const char *, const char *, const int *, const int *,
                          const double *, const int *, const double *, double *,
                          const int *, size_t, size_t);
 
-enum { FAULT_NONE, FAULT_GPU_ERROR, FAULT_GPU_NONFINITE };
+enum { FAULT_NONE, FAULT_GPU_ERROR, FAULT_GPU_NONFINITE, FAULT_GPU_PERTURB };
+
+/*
+ * Exponent-range safety envelope (docs/PRECISION.md). In scaled units every
+ * packed component and every partial sum is bounded, and each float operation
+ * that underflows contributes an absolute error of at most 2^-126 even with
+ * flush-to-zero. A generous bound of 2^ENV_TERM_EXP per k-term (plus two for
+ * the epilogue) covers all such errors; scaled back by 2^so it must stay below
+ * half of the absolute tolerance computed from a cheap lower bound of S_max.
+ * ENV_SO_MAX keeps every intermediate far from FP64 overflow, so the CPU and
+ * GPU paths agree on overflow semantics, and ENV_LOWER_MIN keeps results out
+ * of the FP64 subnormal range.
+ */
+#define ENV_TERM_EXP (-110)
+#define ENV_SO_MAX 1000
+#define ENV_LOWER_MIN 0x1p-900
+
+/* Shape regions where forced Metal showed a reproducible end-to-end win over
+   single-thread OpenBLAS. None has been established (docs/RESULTS-v0.2.md), so
+   auto mode currently serves every call on the CPU. */
+struct region {
+    int min_m, min_n, min_k;
+};
+static const struct region auto_regions[1] = {{0, 0, 0}};
+static const int n_auto_regions = 0;
 
 static struct {
-    int enabled, check, no_device, fault;
-    double min_work, max_work, max_bytes;
-    char report[1024];
+    int mode, check, no_device, fault;
+    double min_work, max_work, max_bytes, test_auto_min_work;
+    char report[1024], telemetry[1024];
 } cfg;
 
 static _Atomic uint64_t stats[VMB_NSTAT];
 /* zgemm_ calls by decade of m*n*k, and time in the GPU attempt / CPU path. */
 static _Atomic uint64_t work_hist[16], try_ns, cpu_ns;
-static double max_check_ratio;  /* guarded by gpu_lock */
+static double max_check_ratio;        /* guarded by gpu_lock */
+static struct vmb_timing last_timing; /* guarded by gpu_lock */
 static pthread_mutex_t gpu_lock = PTHREAD_MUTEX_INITIALIZER;
 static pthread_once_t init_once = PTHREAD_ONCE_INIT;
 static zgemm_fn cpu_zgemm;
 static char cpu_library[1024];
 
 static const char *const status_names[VMB_NSTATUS] = {
-    "ok", "disabled", "trivial", "badarg", "nonfinite", "too_small",
-    "too_large", "no_device", "gpu_error", "gpu_nonfinite", "check_failed",
+    "ok", "disabled", "trivial", "badarg", "nonfinite", "too_small", "too_large",
+    "no_device", "gpu_error", "gpu_nonfinite", "check_failed", "range", "auto_cpu",
 };
+static const char *const mode_names[3] = {"off", "auto", "force"};
+
+double vmb_now(void) { return clock_gettime_nsec_np(CLOCK_UPTIME_RAW) * 1e-9; }
 
 static double env_double(const char *name, double fallback)
 {
@@ -59,8 +87,24 @@ static int env_is(const char *name, const char *value)
     return s && strcmp(s, value) == 0;
 }
 
-static void report_at_exit(void)
+static int env_mode(void)
 {
+    const char *s = getenv("VMB_MODE");
+    if (!s || !*s)  /* v0.1 compatibility: VMB_ENABLE=1 meant every eligible call */
+        return env_is("VMB_ENABLE", "1") ? VMB_MODE_FORCE : VMB_MODE_OFF;
+    for (int m = 0; m < 3; m++)
+        if (strcmp(s, mode_names[m]) == 0)
+            return m;
+    fprintf(stderr, "vmb: unknown VMB_MODE=%s; using off\n", s);
+    return VMB_MODE_OFF;
+}
+
+static void write_at_exit(void)
+{
+    if (cfg.telemetry[0])
+        vmb_telemetry_write(cfg.telemetry);
+    if (!cfg.report[0])
+        return;
     FILE *out = strcmp(cfg.report, "stderr") == 0 ? stderr : fopen(cfg.report, "w");
     if (!out) {
         fprintf(stderr, "vmb: cannot write report to %s\n", cfg.report);
@@ -73,17 +117,20 @@ static void report_at_exit(void)
 
 void vmb_config_reload(void)
 {
-    cfg.enabled = env_is("VMB_ENABLE", "1");
+    cfg.mode = env_mode();
     cfg.check = env_is("VMB_CHECK", "1");
     cfg.no_device = env_is("VMB_TEST_NO_DEVICE", "1");
     cfg.fault = env_is("VMB_TEST_FAULT", "gpu_error")       ? FAULT_GPU_ERROR
                 : env_is("VMB_TEST_FAULT", "gpu_nonfinite") ? FAULT_GPU_NONFINITE
+                : env_is("VMB_TEST_FAULT", "gpu_perturb")   ? FAULT_GPU_PERTURB
                                                             : FAULT_NONE;
     cfg.min_work = env_double("VMB_MIN_WORK", 0.0);
     cfg.max_work = env_double("VMB_MAX_WORK", 0x1p34);
     cfg.max_bytes = env_double("VMB_MAX_BYTES", 0x1p30);
-    const char *report = getenv("VMB_REPORT");
+    cfg.test_auto_min_work = env_double("VMB_TEST_AUTO_MIN_WORK", -1.0);
+    const char *report = getenv("VMB_REPORT"), *telemetry = getenv("VMB_TELEMETRY");
     snprintf(cfg.report, sizeof cfg.report, "%s", report ? report : "");
+    snprintf(cfg.telemetry, sizeof cfg.telemetry, "%s", telemetry ? telemetry : "");
 }
 
 /* zgemm_ exported by the loaded OpenBLAS image. RTLD_NEXT is not used: the
@@ -117,8 +164,8 @@ static void init(void)
         abort();
     }
     vmb_config_reload();
-    if (cfg.report[0])
-        atexit(report_at_exit);
+    if (cfg.report[0] || cfg.telemetry[0])
+        atexit(write_at_exit);
 }
 
 static int trans_code(char t)
@@ -133,19 +180,28 @@ static int trans_code(char t)
 
 static int imax(int a, int b) { return a > b ? a : b; }
 
-/* Returns 0 if a stored element is non-finite; *maxabs is max(|re|, |im|). */
-static int scan(const double *x, int rows, int cols, int ld, double *maxabs)
+/* Returns 0 if a stored element is non-finite. *maxabs, and the optional
+   per-column / per-row maxima, use max(|re|, |im|). */
+static int scan(const double *x, int rows, int cols, int ld, double *colmax, double *rowmax,
+                double *maxabs)
 {
     double mx = 0.0;
     for (int j = 0; j < cols; j++) {
         const double *col = x + 2 * (size_t)j * ld;
-        for (int i = 0; i < 2 * rows; i++) {
-            double v = fabs(col[i]);
-            if (!isfinite(v))
+        double cmx = 0.0;
+        for (int i = 0; i < rows; i++) {
+            double v = fmax(fabs(col[2 * i]), fabs(col[2 * i + 1]));
+            if (!isfinite(col[2 * i]) || !isfinite(col[2 * i + 1]))
                 return 0;
-            if (v > mx)
-                mx = v;
+            if (v > cmx)
+                cmx = v;
+            if (rowmax && v > rowmax[i])
+                rowmax[i] = v;
         }
+        if (colmax)
+            colmax[j] = cmx;
+        if (cmx > mx)
+            mx = cmx;
     }
     *maxabs = mx;
     return 1;
@@ -153,6 +209,13 @@ static int scan(const double *x, int rows, int cols, int ld, double *maxabs)
 
 /* Exponent e with v * 2^-e in [0.5, 1); 0 for v == 0. */
 static int scale_exp(double v) { return v > 0 ? ilogb(v) + 1 : 0; }
+
+static int range_safe(int k, int so, double lower)
+{
+    if (so > ENV_SO_MAX || !(lower >= ENV_LOWER_MIN))
+        return 0;
+    return ldexp(k + 2.0, so + ENV_TERM_EXP) <= 0.5 * VMB_ATOL(lower);
+}
 
 static void op_elem(const double *x, int ld, int trans, int row, int col, double *re, double *im)
 {
@@ -162,7 +225,36 @@ static void op_elem(const double *x, int ld, int trans, int row, int col, double
     *im = trans == 2 ? -z[1] : z[1];
 }
 
-/* Max over elements of |gpu - cpu| / (atol + rtol S_ij) against OpenBLAS. */
+double vmb_tolerance_ratio(size_t count, const double *got, const double *ref,
+                           const double *scale, int k)
+{
+    double smax = 0.0;
+    for (size_t e = 0; e < count; e++) {
+        if (!isfinite(scale[e]) || scale[e] < 0.0)
+            return INFINITY;
+        smax = fmax(smax, scale[e]);
+    }
+    double atol = VMB_ATOL(smax), rtol = VMB_RTOL(k), worst = 0.0;
+    for (size_t e = 0; e < count; e++) {
+        const double *g = got + 2 * e, *r = ref + 2 * e;
+        if (!isfinite(g[0]) || !isfinite(g[1]) || !isfinite(r[0]) || !isfinite(r[1]))
+            return INFINITY;
+        double err = hypot(g[0] - r[0], g[1] - r[1]);
+        if (!isfinite(err))
+            return INFINITY;
+        if (err == 0.0)
+            continue;  /* exact agreement passes even with zero tolerance */
+        double tol = atol + rtol * scale[e];
+        if (!(tol > 0.0))
+            return INFINITY;
+        double q = err / tol;
+        if (!(q <= worst))
+            worst = q;  /* q is never NaN here; inf propagates */
+    }
+    return worst;
+}
+
+/* err/tol of the GPU result against OpenBLAS on the same inputs. */
 static double shadow_check(int ta, int tb, int m, int n, int k, const double *alpha,
                            const double *a, int lda, const double *b, int ldb,
                            const double *beta, const double *c, int ldc, int beta_zero,
@@ -180,7 +272,7 @@ static double shadow_check(int ta, int tb, int m, int n, int k, const double *al
         memcpy(ref + 2 * (size_t)j * m, c + 2 * (size_t)j * ldc, 2 * (size_t)m * sizeof *ref);
     cpu_zgemm(&flags[ta], &flags[tb], &m, &n, &k, alpha, a, &lda, b, &ldb, beta, ref, &m, 1, 1);
 
-    double smax = 0.0, aa = hypot(alpha[0], alpha[1]), ab = hypot(beta[0], beta[1]);
+    double aa = hypot(alpha[0], alpha[1]), ab = hypot(beta[0], beta[1]);
     for (int j = 0; j < n; j++)
         for (int i = 0; i < m; i++) {
             double acc = 0.0, xr, xi, yr, yi;
@@ -193,16 +285,8 @@ static double shadow_check(int ta, int tb, int m, int n, int k, const double *al
             if (!beta_zero)
                 sij += ab * hypot(c[2 * (i + (size_t)j * ldc)], c[2 * (i + (size_t)j * ldc) + 1]);
             s[i + (size_t)j * m] = sij;
-            if (sij > smax)
-                smax = sij;
         }
-    double ratio = 0.0, atol = VMB_ATOL(smax), rtol = VMB_RTOL(k);
-    for (size_t e = 0; e < mn; e++) {
-        double r = hypot(out[2 * e] - ref[2 * e], out[2 * e + 1] - ref[2 * e + 1]) /
-                   (atol + rtol * s[e]);
-        if (!(r <= ratio))
-            ratio = r;  /* also propagates NaN */
-    }
+    double ratio = vmb_tolerance_ratio(mn, out, ref, s, k);
     free(ref);
     free(s);
     return ratio;
@@ -212,6 +296,7 @@ static int try_gpu(char transa, char transb, int m, int n, int k, const double a
                    const double *a, int lda, const double *b, int ldb,
                    const double beta[2], double *c, int ldc)
 {
+    double t_start = vmb_now();
     int ta = trans_code(transa), tb = trans_code(transb);
     int rows_a = ta ? k : m, cols_a = ta ? m : k;
     int rows_b = tb ? n : k, cols_b = tb ? k : n;
@@ -229,29 +314,42 @@ static int try_gpu(char transa, char transb, int m, int n, int k, const double a
     if (work > cfg.max_work || bytes > cfg.max_bytes)
         return VMB_DECLINED_TOO_LARGE;
 
+    /* lmax[l]: max over i of op(A)_il; lmax[k + l]: max over j of op(B)_lj. */
+    double *lmax = calloc(2 * (size_t)k, sizeof *lmax);
+    if (!lmax)
+        return VMB_DECLINED_TOO_LARGE;
     int beta_zero = beta[0] == 0.0 && beta[1] == 0.0;  /* BLAS: C is not read */
     double ma, mb, mc = 0.0;
-    if (!scan(a, rows_a, cols_a, lda, &ma) || !scan(b, rows_b, cols_b, ldb, &mb) ||
-        (!beta_zero && !scan(c, m, n, ldc, &mc)))
+    int finite = scan(a, rows_a, cols_a, lda, ta ? NULL : lmax, ta ? lmax : NULL, &ma) &&
+                 scan(b, rows_b, cols_b, ldb, tb ? lmax + k : NULL, tb ? NULL : lmax + k, &mb) &&
+                 (beta_zero || scan(c, m, n, ldc, NULL, NULL, &mc));
+    double prod = 0.0;
+    for (int l = 0; finite && l < k; l++)
+        prod = fmax(prod, lmax[l] * lmax[k + l]);
+    free(lmax);
+    if (!finite)
         return VMB_DECLINED_NONFINITE;
-    if (!vmb_gpu_available(cfg.no_device))
-        return VMB_DECLINED_NO_DEVICE;
 
     /* Power-of-two scaling keeps packed values in [-1, 1] and the output near
-       unit magnitude, so float-float exponent range is never the limit. */
+       unit magnitude; the envelope then bounds what scaling cannot fix. */
     struct vmb_gpu_job job = {
         .ta = ta, .tb = tb, .m = m, .n = n, .k = k,
         .a = a, .lda = lda, .rows_a = rows_a, .cols_a = cols_a, .sa = scale_exp(ma),
         .b = b, .ldb = ldb, .rows_b = rows_b, .cols_b = cols_b, .sb = scale_exp(mb),
         .c = c, .ldc = ldc, .beta_zero = beta_zero, .sc = scale_exp(mc),
     };
+    double amax = fmax(fabs(alpha[0]), fabs(alpha[1])), bmax = fmax(fabs(beta[0]), fabs(beta[1]));
     int kbits = ilogb((double)k) + 2;  /* 2k <= 2^kbits bounds the sum */
-    job.so = scale_exp(fmax(fabs(alpha[0]), fabs(alpha[1]))) + 1 + job.sa + job.sb + kbits;
+    job.so = scale_exp(amax) + 1 + job.sa + job.sb + kbits;
+    double lower = amax * prod;  /* lower bound of max_ij S_ij */
     if (!beta_zero && mc > 0.0) {
-        int so_c = scale_exp(fmax(fabs(beta[0]), fabs(beta[1]))) + 1 + job.sc;
-        if (so_c > job.so)
-            job.so = so_c;
+        job.so = imax(job.so, scale_exp(bmax) + 1 + job.sc);
+        lower = fmax(lower, bmax * mc);
     }
+    if (!range_safe(k, job.so, lower))
+        return VMB_DECLINED_RANGE;
+    if (!vmb_gpu_available(cfg.no_device))
+        return VMB_DECLINED_NO_DEVICE;
     for (int p = 0; p < 2; p++) {
         job.alpha_s[p] = ldexp(alpha[p], job.sa + job.sb - job.so);
         job.beta_s[p] = beta_zero ? 0.0 : ldexp(beta[p], job.sc - job.so);
@@ -268,6 +366,7 @@ static int try_gpu(char transa, char transb, int m, int n, int k, const double a
         stats[VMB_STAT_GPU_SUBMITTED]++;
     if (rc == 0 && cfg.fault == FAULT_GPU_ERROR)
         rc = -1;
+    double t_finish = vmb_now();
     if (rc != 0) {
         status = VMB_FAILED_GPU;
         goto done;
@@ -282,6 +381,8 @@ static int try_gpu(char transa, char transb, int m, int n, int k, const double a
             status = VMB_FAILED_GPU_NONFINITE;
             goto done;
         }
+    if (cfg.fault == FAULT_GPU_PERTURB)
+        job.out[0] += 1.0 + fabs(job.out[0]);
     if (cfg.check) {
         double r = shadow_check(ta, tb, m, n, k, alpha, a, lda, b, ldb, beta, c, ldc,
                                 beta_zero, job.out);
@@ -297,6 +398,10 @@ static int try_gpu(char transa, char transb, int m, int n, int k, const double a
         memcpy(c + 2 * (size_t)j * ldc, job.out + 2 * (size_t)j * m, 2 * (size_t)m * sizeof *c);
     stats[VMB_STAT_CONSUMED]++;
 done:
+    last_timing = (struct vmb_timing){
+        .pack = job.t_pack, .encode = job.t_encode, .gpu = job.t_gpu, .wait = job.t_wait,
+        .unpack = job.t_unpack, .finish = vmb_now() - t_finish, .total = vmb_now() - t_start,
+    };
     pthread_mutex_unlock(&gpu_lock);
     free(job.out);
     return status;
@@ -312,6 +417,16 @@ int vmb_zgemm_try(char transa, char transb, int m, int n, int k, const double al
     return status;
 }
 
+static int auto_selects(int m, int n, int k)
+{
+    if (cfg.test_auto_min_work >= 0.0)  /* test hook: exercises the auto route */
+        return (double)m * n * k >= cfg.test_auto_min_work;
+    for (int r = 0; r < n_auto_regions; r++)
+        if (m >= auto_regions[r].min_m && n >= auto_regions[r].min_n && k >= auto_regions[r].min_k)
+            return 1;
+    return 0;
+}
+
 void zgemm_(const char *transa, const char *transb, const int *m, const int *n,
             const int *k, const double *alpha, const double *a, const int *lda,
             const double *b, const int *ldb, const double *beta, double *c,
@@ -323,11 +438,12 @@ void zgemm_(const char *transa, const char *transb, const int *m, const int *n,
     work_hist[work < 10.0 ? 0 : (int)fmin(15.0, floor(log10(work)))]++;
     uint64_t t0 = clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
     int status;
-    if (cfg.enabled) {
+    if (cfg.mode == VMB_MODE_FORCE ||
+        (cfg.mode == VMB_MODE_AUTO && auto_selects(*m, *n, *k))) {
         status = vmb_zgemm_try(*transa, *transb, *m, *n, *k, alpha, a, *lda, b, *ldb,
                                beta, c, *ldc);
     } else {
-        status = VMB_DECLINED_DISABLED;
+        status = cfg.mode == VMB_MODE_AUTO ? VMB_DECLINED_AUTO : VMB_DECLINED_DISABLED;
         stats[VMB_STAT_REASON_BASE + status]++;
     }
     uint64_t t1 = clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
@@ -336,7 +452,19 @@ void zgemm_(const char *transa, const char *transb, const int *m, const int *n,
         stats[VMB_STAT_CPU_CALLS]++;
         cpu_zgemm(transa, transb, m, n, k, alpha, a, lda, b, ldb, beta, c, ldc,
                   len_transa, len_transb);
-        cpu_ns += clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - t1;
+    }
+    uint64_t t2 = clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
+    if (status != VMB_OK)
+        cpu_ns += t2 - t1;
+    if (cfg.telemetry[0]) {
+        struct vmb_shape shape = {
+            .m = *m, .n = *n, .k = *k, .lda = *lda, .ldb = *ldb, .ldc = *ldc,
+            .ta = *transa, .tb = *transb,
+            .beta_class = beta[0] == 0.0 && beta[1] == 0.0   ? 0
+                          : beta[0] == 1.0 && beta[1] == 0.0 ? 1
+                                                             : 2,
+        };
+        vmb_telemetry_record(&shape, status, (t2 - t0) * 1e-9);
     }
 }
 
@@ -346,6 +474,29 @@ void vmb_cpu_zgemm(char transa, char transb, int m, int n, int k, const double a
 {
     pthread_once(&init_once, init);
     cpu_zgemm(&transa, &transb, &m, &n, &k, alpha, a, &lda, b, &ldb, beta, c, &ldc, 1, 1);
+}
+
+int vmb_device_init(double *seconds)
+{
+    pthread_once(&init_once, init);
+    double t0 = vmb_now();
+    int ok = vmb_gpu_available(cfg.no_device);
+    if (seconds)
+        *seconds = vmb_now() - t0;
+    return ok;
+}
+
+int vmb_mode(void)
+{
+    pthread_once(&init_once, init);
+    return cfg.mode;
+}
+
+void vmb_last_timing(struct vmb_timing *out)
+{
+    pthread_mutex_lock(&gpu_lock);
+    *out = last_timing;
+    pthread_mutex_unlock(&gpu_lock);
 }
 
 void vmb_stats_get(uint64_t out[VMB_NSTAT])
@@ -383,8 +534,8 @@ void vmb_report(FILE *out)
     };
     const char *dev = vmb_gpu_device_name();
     const char *err = vmb_gpu_init_error();
-    fprintf(out, "vmb.enabled=%d\nvmb.check=%d\nvmb.min_work=%.17g\n", cfg.enabled, cfg.check,
-            cfg.min_work);
+    fprintf(out, "vmb.version=0.2\nvmb.mode=%s\nvmb.enabled=%d\nvmb.check=%d\nvmb.min_work=%.17g\n",
+            mode_names[cfg.mode], cfg.mode != VMB_MODE_OFF, cfg.check, cfg.min_work);
     fprintf(out, "vmb.device=%s\n", dev ? dev : "none");
     if (err && *err)
         fprintf(out, "vmb.device_error=%s\n", err);

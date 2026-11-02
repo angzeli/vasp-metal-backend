@@ -29,7 +29,10 @@ $(BUILD)/vmb_dispatch.o: src/vmb_dispatch.c include/vmb.h src/vmb_internal.h | $
 $(BUILD)/vmb_metal.o: src/vmb_metal.m src/vmb_internal.h $(BUILD)/zgemm_df64_metal.h
 	$(CC) $(OBJCFLAGS) -c $< -o $@
 
-$(BUILD)/libvmb.a: $(BUILD)/vmb_dispatch.o $(BUILD)/vmb_metal.o
+$(BUILD)/vmb_telemetry.o: src/vmb_telemetry.c include/vmb.h src/vmb_internal.h | $(BUILD)
+	$(CC) $(CFLAGS) -c $< -o $@
+
+$(BUILD)/libvmb.a: $(BUILD)/vmb_dispatch.o $(BUILD)/vmb_metal.o $(BUILD)/vmb_telemetry.o
 	rm -f $@
 	ar rcs $@ $^
 

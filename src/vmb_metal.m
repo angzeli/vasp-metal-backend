@@ -120,9 +120,11 @@ static void pack(float *dst, const double *src, int rows, int cols, int ld, int 
         }
 }
 
-int vmb_gpu_zgemm(const struct vmb_gpu_job *job, int *submitted)
+int vmb_gpu_zgemm(struct vmb_gpu_job *job, int *submitted)
 {
     *submitted = 0;
+    job->t_pack = job->t_encode = job->t_gpu = job->t_wait = job->t_unpack = 0.0;
+    double t0 = vmb_now();
     size_t na = (size_t)job->rows_a * job->cols_a, nb = (size_t)job->rows_b * job->cols_b;
     size_t mn = (size_t)job->m * job->n;
     @autoreleasepool {
@@ -134,6 +136,8 @@ int vmb_gpu_zgemm(const struct vmb_gpu_job *job, int *submitted)
         pack(b.contents, job->b, job->rows_b, job->cols_b, job->ldb, job->sb);
         if (!job->beta_zero)
             pack(c.contents, job->c, job->m, job->n, job->ldc, job->sc);
+        double t1 = vmb_now();
+        job->t_pack = t1 - t0;
 
         struct params p = {
             .m = (uint32_t)job->m, .n = (uint32_t)job->n, .k = (uint32_t)job->k,
@@ -163,13 +167,20 @@ int vmb_gpu_zgemm(const struct vmb_gpu_job *job, int *submitted)
         [enc endEncoding];
         [cb commit];
         *submitted = 1;
+        double t2 = vmb_now();
+        job->t_encode = t2 - t1;
         [cb waitUntilCompleted];
+        double t3 = vmb_now();
+        job->t_wait = t3 - t2;
         if (cb.status != MTLCommandBufferStatusCompleted || cb.error)
             return -1;
+        if (cb.GPUEndTime > cb.GPUStartTime)
+            job->t_gpu = cb.GPUEndTime - cb.GPUStartTime;
 
         const float *o = out.contents;
         for (size_t e = 0; e < 2 * mn; e++)
             job->out[e] = ldexp((double)o[2 * e] + (double)o[2 * e + 1], job->so);
+        job->t_unpack = vmb_now() - t3;
     }
     return 0;
 }
