@@ -4,6 +4,7 @@
 #include "vmb_internal.h"
 
 #include <dlfcn.h>
+#include <limits.h>
 #include <mach-o/dyld.h>
 #include <math.h>
 #include <pthread.h>
@@ -26,9 +27,10 @@ enum { FAULT_NONE, FAULT_GPU_ERROR, FAULT_GPU_NONFINITE, FAULT_GPU_PERTURB };
  * flush-to-zero. A generous bound of 2^ENV_TERM_EXP per k-term (plus two for
  * the epilogue) covers all such errors; scaled back by 2^so it must stay below
  * half of the absolute tolerance computed from a cheap lower bound of S_max.
- * ENV_SO_MAX keeps every intermediate far from FP64 overflow, so the CPU and
- * GPU paths agree on overflow semantics, and ENV_LOWER_MIN keeps results out
- * of the FP64 subnormal range.
+ * ENV_SO_MAX bounds the exponent of the scaled output and, through cpu_exp(),
+ * of every unscaled intermediate the CPU path may form, so both paths stay far
+ * from FP64 overflow and agree on its semantics. ENV_LOWER_MIN keeps results
+ * out of the FP64 subnormal range.
  */
 #define ENV_TERM_EXP (-110)
 #define ENV_SO_MAX 1000
@@ -210,9 +212,35 @@ static int scan(const double *x, int rows, int cols, int ld, double *colmax, dou
 /* Exponent e with v * 2^-e in [0.5, 1); 0 for v == 0. */
 static int scale_exp(double v) { return v > 0 ? ilogb(v) + 1 : 0; }
 
-static int range_safe(int k, int so, double lower)
+/*
+ * Overflow-safe exponent bound, from integers only, on every unscaled value
+ * the CPU path may form; each magnitude is < 2^e for the e listed:
+ *   real product x*y of op(A)_il, op(B)_lj components    ep = max_l(ea_l + eb_l)
+ *   any partial sum of the 2k real products making up
+ *   a real or imaginary part, in any order (< 2k 2^ep)    es = ep + kbits + 1 (margin)
+ *   alpha applied to that sum (complex multiply), or
+ *   first to an operand as reference BLAS does            ealpha + max(es, sa, sb) + 1
+ *   beta*C                                                ebeta + sc + 1
+ *   the final sum of the alpha and beta terms             max of both + 1
+ * ea_l, eb_l, sa, sb, sc, ealpha, ebeta are scale_exp() of the corresponding
+ * component maxima, so each value is strictly below 2^e. The unscaled sum
+ * itself is bounded independently of alpha: a tiny alpha cannot hide it.
+ */
+static int cpu_exp(int ep, int kbits, int ealpha, int sa, int sb, int beta_term, int ebeta,
+                   int sc)
 {
-    if (so > ENV_SO_MAX || !(lower >= ENV_LOWER_MIN))
+    int es = ep + kbits + 1;
+    int e_alpha = ealpha + imax(es, imax(sa, sb)) + 1;
+    int e = imax(es, e_alpha);
+    if (beta_term)
+        e = imax(e, imax(e_alpha, ebeta + sc + 1) + 1);
+    return e;
+}
+
+static int range_safe(int k, int so, int cpu_e, double lower)
+{
+    /* lower is +inf when it could not be formed safely: never permissive. */
+    if (so > ENV_SO_MAX || cpu_e > ENV_SO_MAX || !isfinite(lower) || !(lower >= ENV_LOWER_MIN))
         return 0;
     return ldexp(k + 2.0, so + ENV_TERM_EXP) <= 0.5 * VMB_ATOL(lower);
 }
@@ -323,12 +351,14 @@ static int try_gpu(char transa, char transb, int m, int n, int k, const double a
     int finite = scan(a, rows_a, cols_a, lda, ta ? NULL : lmax, ta ? lmax : NULL, &ma) &&
                  scan(b, rows_b, cols_b, ldb, tb ? lmax + k : NULL, tb ? NULL : lmax + k, &mb) &&
                  (beta_zero || scan(c, m, n, ldc, NULL, NULL, &mc));
-    double prod = 0.0;
-    for (int l = 0; finite && l < k; l++)
-        prod = fmax(prod, lmax[l] * lmax[k + l]);
-    free(lmax);
-    if (!finite)
+    if (!finite) {
+        free(lmax);
         return VMB_DECLINED_NONFINITE;
+    }
+    int ep = INT_MIN / 4;  /* no nonzero product */
+    for (int l = 0; l < k; l++)
+        if (lmax[l] > 0.0 && lmax[k + l] > 0.0)
+            ep = imax(ep, scale_exp(lmax[l]) + scale_exp(lmax[k + l]));
 
     /* Power-of-two scaling keeps packed values in [-1, 1] and the output near
        unit magnitude; the envelope then bounds what scaling cannot fix. */
@@ -340,13 +370,25 @@ static int try_gpu(char transa, char transb, int m, int n, int k, const double a
     };
     double amax = fmax(fabs(alpha[0]), fabs(alpha[1])), bmax = fmax(fabs(beta[0]), fabs(beta[1]));
     int kbits = ilogb((double)k) + 2;  /* 2k <= 2^kbits bounds the sum */
+    int beta_term = !beta_zero && mc > 0.0;
     job.so = scale_exp(amax) + 1 + job.sa + job.sb + kbits;
-    double lower = amax * prod;  /* lower bound of max_ij S_ij */
-    if (!beta_zero && mc > 0.0) {
+    if (beta_term)
         job.so = imax(job.so, scale_exp(bmax) + 1 + job.sc);
-        lower = fmax(lower, bmax * mc);
+    int cpu_e = cpu_exp(ep, kbits, scale_exp(amax), job.sa, job.sb, beta_term, scale_exp(bmax),
+                        job.sc);
+    /* lower bound of max_ij S_ij; formed only once cpu_e shows that every
+       product below is < 2^ENV_SO_MAX, so nothing here can overflow. */
+    double lower = INFINITY;
+    if (cpu_e <= ENV_SO_MAX) {
+        double prod = 0.0;
+        for (int l = 0; l < k; l++)
+            prod = fmax(prod, lmax[l] * lmax[k + l]);
+        lower = amax * prod;
+        if (beta_term)
+            lower = fmax(lower, bmax * mc);
     }
-    if (!range_safe(k, job.so, lower))
+    free(lmax);
+    if (!range_safe(k, job.so, cpu_e, lower))
         return VMB_DECLINED_RANGE;
     if (!vmb_gpu_available(cfg.no_device))
         return VMB_DECLINED_NO_DEVICE;

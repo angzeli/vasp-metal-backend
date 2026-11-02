@@ -29,6 +29,11 @@ licensed VASP objects are relinked privately and never leave the local machine.
   verified Si2 run did not contain such operands. v0.2 adds an
   exponent-range safety envelope with a counted fallback; see
   [docs/PRECISION.md](docs/PRECISION.md).
+- **Overflow fix after the Si2 run.** PR #1 review found that the v0.2
+  envelope did not bound the unscaled products and sums the CPU path forms.
+  With a tiny alpha, a call whose FP64 evaluation overflows could reach the
+  GPU. The fix rejects such calls as `range`. It is standalone-regression
+  verified; the Si2 result above is from the build before it (`0344fdb`).
 - **Exploratory benchmarks.** On a busy host, forced Metal beat single-thread
   OpenBLAS by 1.2 to 3.4× for synthetic shapes with m·n·k ≥ about 1.5e7. It was
   10 to 100× slower for Si2-sized shapes, because each call carries about
@@ -116,7 +121,7 @@ group, no retries.
 
 ## Standalone results (Apple M3 Max)
 
-- `build/test_zgemm`: 134 cases.
+- `build/test_zgemm`: 138 cases.
 - `build/test_fortran_abi`: 12 calls, against a quad-precision oracle.
 - `tests/test_compare_runs.py`: 15 cases.
 
@@ -134,7 +139,8 @@ All pass. The tolerance per element, fixed before testing, is
 The following cases route to OpenBLAS exactly once and are bit-identical to
 calling OpenBLAS directly:
 - out-of-envelope operands: the diag(2^±90) regression, products near FP64
-  underflow or overflow, `inf - inf`, all-zero products;
+  underflow or overflow, unscaled products or partial sums that overflow under
+  a tiny alpha, `inf - inf`, all-zero products;
 - non-finite input, quick returns and invalid lda;
 - a call below the size threshold, no device, or mode off or auto;
 - injected faults: a GPU error, a non-finite GPU output, and a perturbed GPU

@@ -467,6 +467,69 @@ static void safety_cases(void)
     set_env("VMB_CHECK", NULL);
 }
 
+/* Unscaled-overflow regressions on real entries: N,N, m = n = 1, k = 2,
+   beta = 0, VMB_MODE=force, VMB_CHECK=0. A direct try must decline with range
+   and leave a sentinel C untouched; through zgemm_ the call must be one range
+   fallback that is bit-identical to calling OpenBLAS directly. With
+   want_range == 0 it is a positive control that must reach the GPU. */
+static void overflow_case(const char *label, int want_range, double alpha_re,
+                          const double a[2], const double b[2])
+{
+    const double alpha[2] = {alpha_re, 0}, zero[2] = {0, 0};
+    const double av[4] = {a[0], 0, a[1], 0}, bv[4] = {b[0], 0, b[1], 0};
+    const double sentinel[2] = {12345.0, -678.0};
+    double ct[2], cg[2], cc[2];
+    uint64_t before[VMB_NSTAT], after[VMB_NSTAT];
+    memcpy(ct, sentinel, sizeof ct), memcpy(cg, sentinel, sizeof cg), memcpy(cc, sentinel, sizeof cc);
+
+    int st = vmb_zgemm_try('N', 'N', 1, 1, 2, alpha, av, 1, bv, 2, zero, ct, 1);
+    vmb_stats_get(before);
+    char t = 'N';
+    int one = 1, two = 2;
+    zgemm_(&t, &t, &one, &one, &two, alpha, av, &one, bv, &two, zero, cg, &one, 1, 1);
+    vmb_stats_get(after);
+    vmb_cpu_zgemm('N', 'N', 1, 1, 2, alpha, av, 1, bv, 2, zero, cc, 1);
+#define D(i) (after[i] - before[i])
+    unsigned long long range = D(VMB_STAT_REASON_BASE + VMB_DECLINED_RANGE),
+                       sub = D(VMB_STAT_GPU_SUBMITTED), used = D(VMB_STAT_CONSUMED),
+                       cpu = D(VMB_STAT_CPU_CALLS);
+#undef D
+    cases++;
+    if (want_range) {
+        expect(st == VMB_DECLINED_RANGE, label, "direct try did not return range");
+        expect(memcmp(ct, sentinel, sizeof ct) == 0, label, "direct try wrote to C");
+        expect(range == 1 && sub == 0 && used == 0 && cpu == 1, label,
+               "zgemm_ counter deltas are not range=1 submitted=0 consumed=0 cpu=1");
+    } else {
+        expect(st == VMB_OK, label, "direct try did not consume a GPU result");
+        expect(range == 0 && sub == 1 && used == 1 && cpu == 0, label,
+               "zgemm_ counter deltas are not range=0 submitted=1 consumed=1 cpu=0");
+    }
+    expect(memcmp(cg, cc, sizeof cg) == 0, label, "zgemm_ result differs from OpenBLAS");
+    printf("%-28s try=%d; zgemm_ deltas range=%llu submitted=%llu consumed=%llu cpu=%llu; "
+           "C=(%a, %a) %s OpenBLAS (%a, %a)\n", label, st, range, sub, used, cpu, cg[0], cg[1],
+           memcmp(cg, cc, sizeof cg) == 0 ? "==" : "!=", cc[0], cc[1]);
+}
+
+static void overflow_cases(void)
+{
+    set_env("VMB_MODE", "force");
+    set_env("VMB_CHECK", "0");
+    /* Each unscaled product is 2^1040; alpha * (A B) is exactly 2^541. */
+    overflow_case("overflow: products 2^1040", 1, 0x1p-500,
+                  (const double[2]){0x1p600, 0x1p440}, (const double[2]){0x1p440, 0x1p600});
+    /* Each product is 2^1023 (finite); their sum is 2^1024. Exact result 2^524. */
+    overflow_case("overflow: partial sum 2^1024", 1, 0x1p-500,
+                  (const double[2]){0x1p511, 0x1p511}, (const double[2]){0x1p512, 0x1p512});
+    /* Positive controls: the same shape and alpha with representable sums. */
+    overflow_case("overflow ctl: alpha 2^-500", 0, 0x1p-500,
+                  (const double[2]){0x1p10, 0x1p-3}, (const double[2]){0x1p5, 0x1p7});
+    overflow_case("overflow ctl: alpha 1", 0, 1.0,
+                  (const double[2]){1.5, -2.0}, (const double[2]){0.25, 3.0});
+    set_env("VMB_CHECK", NULL);
+    set_env("VMB_MODE", NULL);
+}
+
 /* Route check through zgemm_: expected outcome counted once, result equal to
    OpenBLAS whenever the CPU served the call. */
 static void mode_case(const char *label, int expect_status, int use_diag)
@@ -605,6 +668,7 @@ int main(void)
 
     tolerance_units();
     safety_cases();
+    overflow_cases();
     mode_cases();
     telemetry_case("build/test-telemetry.tsv");
     latency_info();

@@ -7,6 +7,13 @@ were computed on the GPU and their results were used, with no change to the
 SCF. No speedup claim is made for VASP. v0.1 (`d3be811`) results are in
 [RESULTS-v0.1.md](RESULTS-v0.1.md).
 
+That Si2 run used the build at `0344fdb`. A later fix to the safety envelope
+(an FP64 overflow hole in unscaled intermediates, found in PR #1 review) is
+**standalone regression verified** only; it has not been run in VASP. The
+fix only adds fallbacks; it changes no GPU arithmetic. Si2's operands are
+far from FP64 overflow (`range` = 0 in section 6), so the fix would not
+change its routing, but that has not been checked in a VASP run.
+
 ## Hardware and host state
 
 | Item | Value |
@@ -40,6 +47,9 @@ any GPU submission or write to C.
 | Products that overflow; `inf - inf` on the CPU | range fallback; CPU non-finite semantics reproduced bit for bit |
 | beta·C ≈ 2^300 or 2^-300 against O(1) products; one C element 2^200 | GPU consumed, within tolerance |
 | All-zero A (every S_ij = 0) | range fallback, bit-identical |
+| Unscaled products 2^1040, alpha = 2^-500 (exact 2^541); `0344fdb` consumed 0 | range fallback; deltas range +1, submitted 0, consumed 0, CPU +1; bit-identical to OpenBLAS (inf, NaN) |
+| Unscaled partial sum 2^1024 from finite 2^1023 products, alpha = 2^-500 | same as above |
+| Positive controls, same shape: alpha = 2^-500 with moderate entries; alpha = 1 | GPU submitted and consumed, bit-identical to OpenBLAS |
 | Perturbed GPU result with `VMB_CHECK=1` | shadow check fails closed, CPU result used |
 | Fortran ABI, forced, check off, diag regression | C = I exactly through one counted CPU fallback |
 
@@ -50,7 +60,7 @@ The comparison helper `vmb_tolerance_ratio` now fails closed:
 - once a failure is seen, later elements cannot overwrite it.
 
 The same bug also existed in the test harness's own ratio loop and is fixed
-there too. Suites: `test_zgemm` 134 cases, `test_fortran_abi` 12 calls
+there too. Suites: `test_zgemm` 138 cases (134 before the overflow fix), `test_fortran_abi` 12 calls
 (quad-precision oracle), `test_compare_runs` 15 cases, all passing.
 
 ## 2. Modes and telemetry
