@@ -14,8 +14,8 @@ FFLAGS    = -O1 -Wall
 LIBS      = $(BUILD)/libvmb.a -framework Metal -framework Foundation -lobjc \
             -L$(OPENBLAS)/lib -lopenblas
 
-.PHONY: all test clean
-all: $(BUILD)/libvmb.a $(BUILD)/test_zgemm $(BUILD)/test_fortran_abi
+.PHONY: all test bench clean
+all: $(BUILD)/libvmb.a $(BUILD)/test_zgemm $(BUILD)/test_fortran_abi $(BUILD)/shape_replay
 
 $(BUILD):
 	mkdir -p $@
@@ -41,6 +41,9 @@ $(BUILD)/test_zgemm: tests/test_zgemm.c tests/oracle.c tests/oracle.h $(BUILD)/l
 
 $(BUILD)/test_fortran_abi: tests/test_fortran_abi.f90 $(BUILD)/libvmb.a
 	$(FC) $(FFLAGS) -J$(BUILD) $< $(LIBS) -o $@
+
+$(BUILD)/shape_replay: bench/shape_replay.c $(BUILD)/libvmb.a
+	$(CC) $(CFLAGS) $< $(LIBS) -o $@
 
 test: all
 	$(BUILD)/test_zgemm
