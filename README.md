@@ -17,10 +17,14 @@ licensed VASP objects are relinked privately and never leave the local machine.
   against independent CPU oracles on an Apple M3 Max (results below).
 - **Private relink: verified.** Existing VASP 6.6.1 std objects relink cleanly
   with the backend; `zgemm_` now resolves inside the executable.
-- **VASP integration: UNVERIFIED.** No VASP run has been made yet, because the
-  memory-pressure safety gate refused to launch. The blocker and the exact next
-  commands are in [docs/RESULTS.md](docs/RESULTS.md).
-- Default off. No performance claim is made.
+- **VASP integration: verified for correctness and dispatch** on a 2-atom Si
+  static PBE SCF, comparing a backend-off run with a backend-on run. With the
+  backend on, all 802 ZGEMM calls ran on the GPU and their results were used,
+  the SCF converged in the same 12 iterations, and TOTEN matched to 1e-8 eV.
+  Details are in [docs/RESULTS.md](docs/RESULTS.md).
+- **No performance claim.** At these sizes the GPU path is slower (VASP elapsed
+  0.24 s with the backend off versus 1.10 s on, with the shadow check enabled).
+- Default off.
 
 ## How it works
 
@@ -58,6 +62,7 @@ VMB_ENABLE=1 VMB_REPORT=vmb-report.txt mpirun -np 1 private/relink-NEW/vasp_std_
 `scripts/run_si2.py` stages a private Si2 case and performs one bounded launch
 (1 rank, one library thread, NCORE = KPAR = 1, 60 s timeout, memory-pressure
 gate, ledger capped at two launches, own process group, no retries).
+`--allow-warn-pressure` is an explicit override for WARN-level pressure only.
 `scripts/compare_runs.py OFF_DIR ON_DIR` applies the verdict rule.
 
 | Variable | Default | Meaning |
@@ -90,7 +95,8 @@ Repeated GPU calls are bitwise deterministic. A 32×32×32 call takes about
 
 ## Limitations
 
-- One operation (ZGEMM); one rank tested; `VMB_REPORT` is not rank-aware.
+- One operation (ZGEMM); VASP-tested on one tiny system with one rank only;
+  `VMB_REPORT` is not rank-aware.
 - Float-float arithmetic is not IEEE FP64; see the tolerance policy.
 - Paths are pinned to the validated Homebrew toolchain.
 

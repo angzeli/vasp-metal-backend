@@ -3,7 +3,8 @@
 
 Safety contract:
 - at most two launches in total, recorded in a ledger before each launch;
-- memory must be at normal pressure with enough free memory;
+- memory must be at normal pressure (or WARN with an explicit
+  --allow-warn-pressure override, never critical) with enough free memory;
 - 1 MPI rank, one library thread, NCORE = KPAR = 1, synthetic-topology OpenMPI;
 - the launch gets its own session and process group; on timeout or interrupt
   only that group is signalled. There are no retries.
@@ -32,10 +33,11 @@ def sysctl(name):
                           check=True, timeout=10).stdout.strip()
 
 
-def memory_gate():
+def memory_gate(allow_warn):
     level = int(sysctl('kern.memorystatus_vm_pressure_level'))  # 1 normal, 2 warn, 4 critical
     free = int(sysctl('kern.memorystatus_level'))                # percent available
-    return level, free, level == 1 and free >= MIN_FREE_PERCENT
+    allowed = (1, 2) if allow_warn else (1,)
+    return level, free, level in allowed and free >= MIN_FREE_PERCENT
 
 
 def stage(fixture, out):
@@ -57,12 +59,14 @@ def main():
     parser.add_argument('--ledger', required=True, type=Path)
     parser.add_argument('--backend', choices=('off', 'on'), required=True)
     parser.add_argument('--check', action='store_true', help='VMB_CHECK=1 shadow check')
+    parser.add_argument('--allow-warn-pressure', action='store_true',
+                        help='explicit override: also launch at WARN (level 2) pressure')
     args = parser.parse_args()
 
     launches = args.ledger.read_text().splitlines() if args.ledger.exists() else []
     if len(launches) >= MAX_LAUNCHES:
         raise SystemExit(f'launch budget exhausted ({len(launches)} recorded); not launching')
-    level, free, ok = memory_gate()
+    level, free, ok = memory_gate(args.allow_warn_pressure)
     print(f'memory gate: pressure_level={level} free={free}% -> {"PASS" if ok else "FAIL"}')
     if not ok:
         raise SystemExit('insufficient memory headroom; not launching')
@@ -109,6 +113,7 @@ def main():
     wall = time.monotonic() - started
     meta = (f'backend={args.backend}\ncheck={int(args.check)}\nexit={status}\nreason={reason}\n'
             f'wall_seconds={wall:.3f}\nmemory_pressure_level={level}\nmemory_free_percent={free}\n'
+            f'allow_warn_pressure={int(args.allow_warn_pressure)}\n'
             f'command={" ".join(command)}\n')
     (args.output / 'run-meta.txt').write_text(meta)
     print(meta, end='')
