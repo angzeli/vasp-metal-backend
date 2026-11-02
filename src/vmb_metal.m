@@ -108,16 +108,29 @@ static inline void split(double x, float *d)
     d[1] = (float)(x - (double)hi);
 }
 
+/* Multiplying by a normal power of two rounds exactly like ldexp, so the
+   fast path is bit-identical; other exponents keep the per-element ldexp. */
+static int exact_factor(int e) { return e >= -1000 && e <= 1000; }
+
 /* Dense float4 copy of the stored rows x cols block, scaled by 2^-e. */
 static void pack(float *dst, const double *src, int rows, int cols, int ld, int e)
 {
-    for (int j = 0; j < cols; j++)
-        for (int i = 0; i < rows; i++) {
-            const double *z = src + 2 * ((size_t)i + (size_t)j * ld);
-            float *d = dst + 4 * ((size_t)i + (size_t)j * rows);
-            split(ldexp(z[0], -e), d);
-            split(ldexp(z[1], -e), d + 2);
+    const double f = exact_factor(-e) ? ldexp(1.0, -e) : 0.0;
+    for (int j = 0; j < cols; j++) {
+        const double *z = src + 2 * (size_t)j * ld;
+        float *d = dst + 4 * (size_t)j * rows;
+        if (f != 0.0) {
+            for (int i = 0; i < rows; i++) {
+                split(z[2 * i] * f, d + 4 * i);
+                split(z[2 * i + 1] * f, d + 4 * i + 2);
+            }
+        } else {
+            for (int i = 0; i < rows; i++) {
+                split(ldexp(z[2 * i], -e), d + 4 * i);
+                split(ldexp(z[2 * i + 1], -e), d + 4 * i + 2);
+            }
         }
+    }
 }
 
 int vmb_gpu_zgemm(struct vmb_gpu_job *job, int *submitted)
@@ -178,8 +191,14 @@ int vmb_gpu_zgemm(struct vmb_gpu_job *job, int *submitted)
             job->t_gpu = cb.GPUEndTime - cb.GPUStartTime;
 
         const float *o = out.contents;
-        for (size_t e = 0; e < 2 * mn; e++)
-            job->out[e] = ldexp((double)o[2 * e] + (double)o[2 * e + 1], job->so);
+        if (exact_factor(job->so)) {
+            const double f = ldexp(1.0, job->so);
+            for (size_t e = 0; e < 2 * mn; e++)
+                job->out[e] = ((double)o[2 * e] + (double)o[2 * e + 1]) * f;
+        } else {
+            for (size_t e = 0; e < 2 * mn; e++)
+                job->out[e] = ldexp((double)o[2 * e] + (double)o[2 * e + 1], job->so);
+        }
         job->t_unpack = vmb_now() - t3;
     }
     return 0;
