@@ -57,8 +57,11 @@ def main():
     parser.add_argument('--fixture', required=True, type=Path)
     parser.add_argument('--output', required=True, type=Path, help='new directory')
     parser.add_argument('--ledger', required=True, type=Path)
-    parser.add_argument('--backend', choices=('off', 'on'), required=True)
+    parser.add_argument('--backend', choices=('off', 'auto', 'force', 'on'), required=True,
+                        help='VMB_MODE for the launch; on is the v0.1 name for force')
     parser.add_argument('--check', action='store_true', help='VMB_CHECK=1 shadow check')
+    parser.add_argument('--telemetry', action='store_true',
+                        help='write aggregated shape telemetry (VMB_TELEMETRY)')
     parser.add_argument('--allow-warn-pressure', action='store_true',
                         help='explicit override: also launch at WARN (level 2) pressure')
     args = parser.parse_args()
@@ -77,11 +80,14 @@ def main():
     cores = sysctl('hw.physicalcpu')
     env.update(PATH=PATH, OMP_NUM_THREADS='1', OPENBLAS_NUM_THREADS='1',
                VECLIB_MAXIMUM_THREADS='1', HWLOC_SYNTHETIC=f'Package:1 Core:{cores} PU:1',
-               VMB_ENABLE='1' if args.backend == 'on' else '0',
+               VMB_MODE='force' if args.backend == 'on' else args.backend,
                VMB_CHECK='1' if args.check else '0',
                VMB_REPORT=str(args.output.resolve() / 'vmb-report.txt'))
     forwarded = ['OMP_NUM_THREADS', 'OPENBLAS_NUM_THREADS', 'VECLIB_MAXIMUM_THREADS',
-                 'VMB_ENABLE', 'VMB_CHECK', 'VMB_REPORT']
+                 'VMB_MODE', 'VMB_CHECK', 'VMB_REPORT']
+    if args.telemetry:
+        env['VMB_TELEMETRY'] = str(args.output.resolve() / 'vmb-telemetry.tsv')
+        forwarded.append('VMB_TELEMETRY')
     command = [MPIRUN, '-np', '1', '--bind-to', 'none', '--map-by', 'slot']
     for name in forwarded:
         command += ['-x', name]
