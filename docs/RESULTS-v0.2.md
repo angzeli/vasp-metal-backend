@@ -1,18 +1,21 @@
-# v0.2 results (branch `v0.2-dev`)
+# v0.2 results
 
-**Status:** v0.2 is a safety and measurement release. **The v0.2 build is
-VASP-verified for correctness and dispatch** on the 2-atom Si static PBE
-fixture (section 6). With the v0.2 build in force mode, all 802 ZGEMM calls
-were computed on the GPU and their results were used, with no change to the
-SCF. No speedup claim is made for VASP. v0.1 (`d3be811`) results are in
-[RESULTS-v0.1.md](RESULTS-v0.1.md).
+**Status:** v0.2 is a safety and measurement release. v0.1 (`d3be811`)
+results are in [RESULTS-v0.1.md](RESULTS-v0.1.md).
 
-That Si2 run used the build at `0344fdb`. A later fix to the safety envelope
-(an FP64 overflow hole in unscaled intermediates, found in PR #1 review) is
-**standalone regression verified** only; it has not been run in VASP. The
-fix only adds fallbacks; it changes no GPU arithmetic. Si2's operands are
-far from FP64 overflow (`range` = 0 in section 6), so the fix would not
-change its routing, but that has not been checked in a VASP run.
+| Claim | Status | Build |
+| --- | --- | --- |
+| Standalone numerical safety: `test_zgemm` 138 cases, `test_fortran_abi` 12 calls, `test_compare_runs` 15 cases | **passed** | `afb272e` (final safety fix) |
+| VASP Si2 integration: both SCFs converged, 802/802 GPU results consumed, no TOTEN difference at reported precision (section 6) | **verified** | `0344fdb` (earlier v0.2 build) |
+| VASP integration of the final safety-fix build | **not tested** | `afb272e` |
+| VASP performance acceleration | **not established** | — |
+| Synthetic benchmark speedups (section 3) | exploratory only (busy host) | v0.2 benchmark builds, before and after the pack/unpack optimization |
+
+The `afb272e` fix closed an FP64 overflow hole in unscaled intermediates found
+in PR #1 review. It adds `range` fallbacks and changes no GPU arithmetic. Si2's
+operands are far from FP64 overflow (`range` = 0 in section 6), so the fix is
+**expected** to leave Si2's routing and results unchanged. No new VASP run has
+confirmed this.
 
 ## Hardware and host state
 
@@ -210,7 +213,7 @@ make -j1 all test
 scripts/relink-vasp.sh /path/to/vasp/build/std private/relink-v0.2-NEW
 ```
 
-## 6. VASP integration run (v0.2 build)
+## 6. VASP integration run (v0.2 build at `0344fdb`)
 
 Two sequential launches, authorized explicitly, used a new ledger
 (`private/launch-ledger-v0.2.txt`, now holding its two entries) and the same
@@ -312,6 +315,10 @@ this pair. A future run should leave it out unless it is authorized again.
   shapes remain synthetic.
 - The envelope is conservative. Operands with a very large dynamic range fall
   back even when a per-row or per-column scaling could have served them.
+- The overflow bound covers the intermediates of a conventional ZGEMM
+  evaluation only, not 3M/Gauss multiplication or other reassociations
+  ([PRECISION.md](PRECISION.md)).
+- The final safety-fix build (`afb272e`) has not been run in VASP.
 
 ## Next decision
 

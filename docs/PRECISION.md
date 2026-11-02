@@ -27,7 +27,7 @@ relative to `max S`; that is false when the scales of A and B compensate.
 The v0.1 Si2 integration run did not contain such ranges (802/802 shadow
 checks passed) but the guarantee did not hold in general.
 
-## Unscaled overflow hole (found in PR #1 review, fixed before merge)
+## Unscaled overflow hole (found in PR #1 review, fixed in `afb272e`)
 
 The first v0.2 envelope (`0344fdb`) bounded only the *scaled* output exponent
 `so`, and formed its lower bound `L` (below) as a plain FP64 product. Neither
@@ -51,32 +51,53 @@ catch it, because every individual product is finite.
 
 Before any GPU work, the host computes, in the same pass that checks
 finiteness, the per-index maxima `cA_l = max_i |op(A)_il|` and
-`rB_l = max_j |op(B)_lj|` (component maxima).
+`rB_l = max_j |op(B)_lj|` (component maxima). It then applies two independent
+groups of bounds: an overflow bound on the CPU's FP64 evaluation, and an
+underflow budget for the GPU's binary32 arithmetic.
 
-**Overflow bound on unscaled CPU intermediates.** Let `e(x) = ilogb(x) + 1`
-(so `x < 2^e(x)`), formed for each maximum without multiplying anything. With
-`2k <= 2^kbits`, `ea`/`eb`/`ec` the exponents of the A, B, C maxima, and
-`ealpha`/`ebeta` those of `max(|Re|, |Im|)` of alpha and beta:
+### Overflow bound on modelled unscaled intermediates
 
-    ep = max_l ( e(cA_l) + e(rB_l) )          bounds every real product x*y
-    es = ep + kbits + 1                        bounds every partial sum, in any
-                                               order, of the 2k real products
-                                               forming a real or imaginary part
+Let `e(x) = ilogb(x) + 1` (so `x < 2^e(x)`), formed for each maximum without
+multiplying anything. With `2k <= 2^kbits`, `ea`/`eb`/`ec` the exponents of the
+A, B, C maxima, and `ealpha`/`ebeta` those of `max(|Re|, |Im|)` of alpha and
+beta:
+
+    ep = max_l ( e(cA_l) + e(rB_l) )          every real product x*y of an A
+                                               component and a B component
+    es = ep + kbits + 1                        any partial sum of any subset of
+                                               the 2k real products forming a
+                                               real or imaginary part, in any
+                                               order, with or without FMA
                                                (< 2k 2^ep; +1 margin)
-    eα = ealpha + max(es, ea, eb) + 1          alpha times that sum, or alpha
-                                               applied first to an operand
-                                               (reference BLAS forms alpha*B)
+    eα = ealpha + max(es, ea, eb) + 1          alpha times such a sum, or alpha
+                                               applied first to an A or B
+                                               element (reference BLAS forms
+                                               alpha*B)
     E  = max(es, eα)                           if beta*C is absent
     E  = max(es, max(eα, ebeta + ec + 1) + 1)  otherwise (beta*C and the final sum)
 
-Every unscaled value of these forms has magnitude below `2^E`. This is pure
-integer arithmetic, so it cannot overflow. The sum term `es` stands on its own,
-so a tiny alpha cannot hide an overflowing sum. The bound assumes the CPU path
-forms only these intermediates (component products, sums of them in any order
-or grouping, alpha applied before or after, beta·C and the final add). That
-holds for conventional ZGEMM, but not for algorithms such as 3M/Gauss
-multiplication, whose sums of components can be about twice as large; the
-`+1` margin and the 2^24 headroom below the FP64 limit absorb that.
+This is integer arithmetic, so the bound itself cannot overflow. The sum term
+`es` stands on its own, so a tiny alpha cannot hide an overflowing sum.
+
+**Scope.** `E` covers exactly the intermediates listed above, which are the
+ones a conventional ZGEMM evaluation forms: the 4-real-multiply complex
+product, its products accumulated into real and imaginary parts (separately or
+combined), alpha applied before or after accumulation, beta·C, and the final
+add. It does **not** cover other algorithms or reassociations. In particular,
+3M/Gauss-style complex multiplication first forms sums of operand components
+such as `Re(a) + Im(a)`, which `E` does not bound. Example: k = 1,
+A = 2^1023(1 + i), B = 2^-1000, alpha = 2^-50, beta = 0. Here `es` = 28 and
+`eα` = 976, so the call is accepted (`E` = 976). A 3M implementation would
+evaluate `Re(A) + Im(A)` = 2^1024 and overflow, while a conventional one does
+not.
+
+The CPU path here is OpenBLAS's `zgemm_` entry point. OpenBLAS exposes 3M
+multiplication under the separate name `zgemm3m_`, which this backend neither
+intercepts nor calls. The bound has not been audited against OpenBLAS's
+architecture-specific kernel source; agreement with the installed OpenBLAS is
+established only for the tested cases listed below.
+
+### Lower bound and underflow budget
 
 Only after `E <= 1000` holds is the lower bound formed:
 
@@ -85,20 +106,21 @@ Only after `E <= 1000` holds is the lower bound formed:
 
 Each product is then below 2^1000, so `L` is finite. If `E > 1000`, `L` is set
 to `+inf`, which is rejected explicitly and never treated as a permissive
-tolerance.
+tolerance. `L` is a lower bound of `max_ij S_ij` (a single product term, and
+component maxima never exceed moduli).
 
-    L = max( max(|Re alpha|, |Im alpha|) * max_l cA_l rB_l ,
-             max(|Re beta|,  |Im beta|)  * max |C|          )   (C term only if beta != 0)
+In scaled units every packed value and every partial sum is bounded by 2k, and
+every binary32 operation that underflows, whether it produces a subnormal or is
+flushed to zero, adds an absolute error of at most 2^-126. Each k-term performs
+about 110 binary32 operations and several input components may be flushed, so
+2^-110 per term (and two more terms for the alpha/beta epilogue) is a generous
+bound.
 
-is a lower bound of `max_ij S_ij` (a single product term, and component maxima
-never exceed moduli). In scaled units every packed value and every partial sum
-is bounded by 2k, and every binary32 operation that underflows, whether it
-produces a subnormal or is flushed to zero, adds an absolute error of at most
-2^-126. Each k-term performs about 110 binary32 operations and several input
-components may be flushed, so 2^-110 per term (and two more terms for the
-alpha/beta epilogue) is a generous bound. The GPU path is used only if
+### Decision
 
-    E  <= 1000                                     (unscaled CPU intermediates)
+The GPU path is used only if
+
+    E  <= 1000                                     (modelled unscaled CPU intermediates)
     so <= 1000                                     (scaled output and GPU host values)
     L  finite and L >= 2^-900                      (no FP64 subnormal results)
     (k + 2) * 2^(so - 110)  <=  0.5 * ATOL(L)      (underflow budget)
@@ -109,15 +131,20 @@ Otherwise the call is a counted `range` fallback to the original OpenBLAS
 element's tolerance, and the ordinary rounding error is relative to `S_ij` as
 before.
 
-**What the overflow bounds guarantee.** If the GPU path is taken, every
-unscaled value of the forms listed above is below 2^1000, and so is the
-scaled output scale `2^so`. An FP64 evaluation of the call therefore cannot
-overflow, and no `inf - inf` can arise, so a finite GPU result does not hide
-a non-finite CPU result. Any call that might overflow stays on the CPU, which
-reproduces the installed implementation's non-finite results bit for bit.
-The bounds are conservative: they may decline calls whose actual evaluation is
-safe, never the reverse. They do not claim that OpenBLAS's own result is
-accurate in any other sense.
+**What the overflow bounds guarantee.** If the GPU path is taken:
+- every modelled intermediate listed above is below 2^1000 in magnitude;
+- so is the output scale `2^so`.
+
+So a conventional FP64 ZGEMM evaluation of the call cannot overflow and cannot
+produce `inf - inf`, and a finite GPU result does not stand in for a
+non-finite result from such a CPU path. Calls outside the bound stay on the
+CPU, which reproduces the installed implementation's results bit for bit.
+
+The bound is conservative for the modelled intermediates: it may decline calls
+whose evaluation is safe. It makes no claim about:
+- implementations that form unmodelled intermediates, such as 3M/Gauss or other
+  reassociations of operand components;
+- the accuracy of OpenBLAS's own result.
 
 The envelope is a property of the operands, not of the shape, and applies in
 both `auto` and `force` modes; neither can bypass it. An all-zero product
@@ -174,7 +201,7 @@ the in-process shadow check. `build/test_fortran_abi` repeats the regression
 through the Fortran ABI against a quad-precision oracle.
 
 The two unscaled-overflow regressions above (`overflow:` cases, forced, check
-off) fail on `0344fdb` and pass with the fix:
+off) fail on `0344fdb` and pass on `afb272e`:
 - the direct GPU attempt returns `range` (status 11) and leaves a sentinel C
   unchanged;
 - through `zgemm_`, the counter deltas are `range` +1, GPU submitted 0,

@@ -13,17 +13,17 @@ licensed VASP objects are relinked privately and never leave the local machine.
 
 ## Status
 
-| | v0.1 (`d3be811`, `main`) | v0.2 (branch `v0.2-dev`) |
+| | v0.1 (`d3be811`) | v0.2 (final safety fix `afb272e`) |
 | --- | --- | --- |
-| Standalone correctness | verified | verified, with a safety envelope and fail-closed checks |
-| Private relink | verified | verified (link only) |
-| VASP integration | **verified** on Si2: 802/802 GPU results consumed, same TOTEN | **verified** on Si2: 802/802 consumed, 0 shadow failures, 0 range fallbacks, same TOTEN |
-| Performance claim | none | none for VASP; exploratory synthetic benchmarks only |
+| Standalone correctness | verified | **passed** at `afb272e`: 138 C cases, 12 Fortran ABI calls, 15 run-comparison cases |
+| Private relink | verified | verified (link only, `0344fdb` build) |
+| VASP integration | **verified** on Si2: 802/802 GPU results consumed, same TOTEN | **verified on the earlier `0344fdb` build** (Si2: 802/802 consumed, 0 shadow failures, 0 range fallbacks, same TOTEN); **`afb272e` not VASP-tested** |
+| VASP performance acceleration | not established | **not established**; synthetic benchmarks exploratory only (busy host) |
 
-- **Correctness is not speedup.** The verified Si2 integration shows that GPU
+- **Correctness is not speedup.** The verified Si2 integrations show that GPU
   results can feed a converging SCF without changing the energy. At those sizes
-  the GPU path is slower: VASP's elapsed time was 0.24 s with the backend off
-  and 1.10 s on, with the shadow check enabled.
+  the GPU path is slower: VASP's elapsed time was 0.296 s with the backend off
+  and 1.468 s on (v0.2 run, shadow check and telemetry enabled).
 - **v0.1 defect fixed in v0.2.** v0.1 could silently consume wrong results for
   operands whose scales differ by about 2^90 or more within a matrix. The
   verified Si2 run did not contain such operands. v0.2 adds an
@@ -32,8 +32,13 @@ licensed VASP objects are relinked privately and never leave the local machine.
 - **Overflow fix after the Si2 run.** PR #1 review found that the v0.2
   envelope did not bound the unscaled products and sums the CPU path forms.
   With a tiny alpha, a call whose FP64 evaluation overflows could reach the
-  GPU. The fix rejects such calls as `range`. It is standalone-regression
-  verified; the Si2 result above is from the build before it (`0344fdb`).
+  GPU. The fix (`afb272e`) rejects such calls as `range`. It passed the
+  standalone regressions only; the Si2 result above is from the build before
+  it (`0344fdb`). It is expected not to change Si2's routing, but no new VASP
+  run has confirmed that.
+- **Bound scope.** The overflow bound covers the intermediates of a
+  conventional ZGEMM evaluation, not 3M/Gauss multiplication or other
+  reassociations; see [docs/PRECISION.md](docs/PRECISION.md).
 - **Exploratory benchmarks.** On a busy host, forced Metal beat single-thread
   OpenBLAS by 1.2 to 3.4× for synthetic shapes with m·n·k ≥ about 1.5e7. It was
   10 to 100× slower for Si2-sized shapes, because each call carries about
