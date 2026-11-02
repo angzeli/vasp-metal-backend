@@ -17,8 +17,9 @@ licensed VASP objects are relinked privately and never leave the local machine.
   against independent CPU oracles on an Apple M3 Max (results below).
 - **Private relink: verified.** Existing VASP 6.6.1 std objects relink cleanly
   with the backend; `zgemm_` now resolves inside the executable.
-- **VASP integration: see [docs/RESULTS.md](docs/RESULTS.md)** for the current
-  verdict on the two-run Si2 comparison.
+- **VASP integration: UNVERIFIED.** No VASP run has been made yet, because the
+  memory-pressure safety gate refused to launch. The blocker and the exact next
+  commands are in [docs/RESULTS.md](docs/RESULTS.md).
 - Default off. No performance claim is made.
 
 ## How it works
