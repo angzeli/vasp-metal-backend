@@ -31,6 +31,7 @@ program test_fortran_abi
   integer(c_int64_t) :: s0(32), s1(32)
   integer :: x, y, failures, rc
   real(dp) :: worst
+  complex(dp) :: da(2, 2), db(2, 2), dc(2, 2)
 
   failures = 0
   worst = 0
@@ -49,7 +50,26 @@ program test_fortran_abi
   end do
   call run('C', 'N', (1.0_dp, 0.0_dp), (0.0_dp, 0.0_dp), .true., 1, 0)
 
-  rc = setenv('VMB_ENABLE' // c_null_char, '0' // c_null_char, 1_c_int)
+  ! Regression for d3be811: diag(2^90, 2^-90) diag(2^-90, 2^90) = I exactly.
+  ! Forced mode, shadow check off: the safety envelope must route this to the
+  ! original OpenBLAS (counted) rather than consume a wrong GPU result.
+  rc = setenv('VMB_MODE' // c_null_char, 'force' // c_null_char, 1_c_int)
+  rc = setenv('VMB_CHECK' // c_null_char, '0' // c_null_char, 1_c_int)
+  call vmb_config_reload()
+  da = 0; db = 0; dc = (7.0_dp, 7.0_dp)
+  da(1, 1) = 2.0_dp**90; da(2, 2) = 2.0_dp**(-90)
+  db(1, 1) = 2.0_dp**(-90); db(2, 2) = 2.0_dp**90
+  call vmb_stats_get(s0)
+  call zgemm('N', 'N', 2, 2, 2, (1.0_dp, 0.0_dp), da, 2, db, 2, (0.0_dp, 0.0_dp), dc, 2)
+  call vmb_stats_get(s1)
+  write (*, '(a, 4f5.1, a, 2i2)') 'zgemm diag(2^+-90): C =', real(dc(1, 1)), real(dc(2, 2)), &
+      abs(dc(1, 2)), abs(dc(2, 1)), '  gpu/cpu calls:', &
+      s1(st_consumed) - s0(st_consumed), s1(st_cpu) - s0(st_cpu)
+  if (dc(1, 1) /= (1.0_dp, 0.0_dp) .or. dc(2, 2) /= (1.0_dp, 0.0_dp) .or. &
+      dc(1, 2) /= (0.0_dp, 0.0_dp) .or. dc(2, 1) /= (0.0_dp, 0.0_dp)) call flag('diag result /= I')
+  if (s1(st_consumed) - s0(st_consumed) /= 0) call flag('diag consumed from GPU')
+  if (s1(st_cpu) - s0(st_cpu) /= 1) call flag('diag CPU fallback count')
+  rc = setenv('VMB_MODE' // c_null_char, 'off' // c_null_char, 1_c_int)
   call vmb_config_reload()
   call run('T', 'C', alpha, beta, .false., 0, 1)
 
@@ -58,7 +78,7 @@ program test_fortran_abi
     write (*, '(a, i0, a)') 'FAIL: ', failures, ' fortran ABI failures'
     stop 1
   end if
-  write (*, '(a)') 'PASS: fortran ABI (11 calls)'
+  write (*, '(a)') 'PASS: fortran ABI (12 calls)'
 
 contains
 

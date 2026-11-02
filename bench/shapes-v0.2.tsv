@@ -1,0 +1,26 @@
+# Shape set for bench/shape_replay (v0.2). Every row is SYNTHETIC: no shape here
+# was traced from a VASP run. The only observed data are the v0.1 Si2 decade
+# counts of m*n*k (339 calls in [1e3,1e4), 419 in [1e4,1e5), 44 in [1e5,1e6));
+# "si2-bin" rows are exact shapes synthesized to fall in those bins.
+# "cds" rows are inspired by plane-wave / band counts plausible for a small CdS
+# supercell; "generic" rows probe square, skinny, long-k and padded layouts.
+# role=select rows may inform an auto rule; role=holdout rows only validate it.
+# pad_* are added to the minimal leading dimension; beta in {zero, one, other}.
+id	family	provenance	role	transa	transb	m	n	k	pad_a	pad_b	pad_c	beta
+si2-1e3-nn	si2	synthetic-si2-bin	select	N	N	130	8	8	0	0	0	one
+si2-1e3-cn	si2	synthetic-si2-bin	select	C	N	8	8	130	0	0	0	zero
+si2-1e4-cn	si2	synthetic-si2-bin	select	C	N	16	16	130	0	0	0	zero
+si2-1e4-nn	si2	synthetic-si2-bin	select	N	N	130	16	16	0	0	0	one
+si2-1e5-nn	si2	synthetic-si2-bin	select	N	N	130	32	32	0	0	0	one
+sq-128	square	synthetic-generic	select	N	N	128	128	128	0	0	0	zero
+sq-256	square	synthetic-generic	select	N	N	256	256	256	0	0	0	zero
+sq-512	square	synthetic-generic	select	N	N	512	512	512	0	0	0	zero
+skinny-6000x16	skinny	synthetic-generic	select	N	N	6000	16	128	0	0	0	one
+longk-128-3000	long-k	synthetic-generic	select	C	N	128	128	3000	0	0	0	zero
+cds-rotate	cds	synthetic-cds	select	N	N	3000	128	128	0	0	0	one
+cds-overlap	cds	synthetic-cds	select	C	N	64	256	1500	0	0	0	zero
+padded-1000	padded	synthetic-generic	select	N	N	1000	100	100	24	8	16	other
+holdout-tn	long-k	synthetic-generic	holdout	T	N	200	200	2000	0	0	0	zero
+holdout-nc	skinny	synthetic-generic	holdout	N	C	2048	64	64	0	0	0	one
+holdout-sq384	square	synthetic-generic	holdout	N	N	384	384	384	3	5	7	other
+holdout-cn-longk	long-k	synthetic-cds	holdout	C	N	32	32	4000	0	0	0	zero

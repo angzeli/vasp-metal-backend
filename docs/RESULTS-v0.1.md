@@ -1,4 +1,4 @@
-# v0.1 results
+# v0.1 results (d3be811)
 
 Host: Apple M3 Max (30-core GPU, Metal 4), 36 GiB, 14 physical CPU cores.
 Toolchain: Apple clang 21, Homebrew GCC/gfortran 16.1.0, OpenMPI 5.0.9,

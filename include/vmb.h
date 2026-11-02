@@ -3,9 +3,11 @@
  *
  * The library defines the reference-BLAS symbol `zgemm_` (LP64, 32-bit
  * integers, gfortran hidden character lengths). When linked ahead of OpenBLAS
- * it receives every ZGEMM call of the program. With VMB_ENABLE=1, supported
- * calls are computed on the GPU in float-float ("df64") arithmetic; every other
- * call is forwarded unchanged to the original OpenBLAS `zgemm_`.
+ * it receives every ZGEMM call of the program. VMB_MODE selects off (default),
+ * auto (GPU only for measured winning shape regions) or force (GPU for every
+ * call inside the safety envelope; validation only). GPU calls are computed in
+ * float-float ("df64") arithmetic; every other call is forwarded unchanged to
+ * the original OpenBLAS `zgemm_`.
  *
  * Complex matrices are column-major arrays of interleaved (re, im) doubles.
  */
@@ -23,7 +25,7 @@ extern "C" {
 /* Outcome of vmb_zgemm_try. Only VMB_OK writes to C. */
 enum vmb_status {
     VMB_OK = 0,
-    VMB_DECLINED_DISABLED,     /* VMB_ENABLE is not 1 */
+    VMB_DECLINED_DISABLED,     /* mode off */
     VMB_DECLINED_TRIVIAL,      /* m or n or k is 0, or alpha == 0 */
     VMB_DECLINED_BADARG,       /* invalid trans flag or leading dimension */
     VMB_DECLINED_NONFINITE,    /* NaN/Inf in alpha, beta, A, B or read part of C */
@@ -32,7 +34,9 @@ enum vmb_status {
     VMB_DECLINED_NO_DEVICE,    /* no Metal device or kernel build failed */
     VMB_FAILED_GPU,            /* command buffer did not complete */
     VMB_FAILED_GPU_NONFINITE,  /* GPU produced a non-finite element */
-    VMB_FAILED_CHECK,          /* shadow check exceeded the tolerance */
+    VMB_FAILED_CHECK,          /* shadow check failed (fail closed) */
+    VMB_DECLINED_RANGE,        /* outside the exponent-range safety envelope */
+    VMB_DECLINED_AUTO,         /* auto mode: shape not in a measured GPU region */
     VMB_NSTATUS
 };
 
@@ -57,13 +61,23 @@ enum vmb_stat {
 #define VMB_RTOL(k) (8.0 * ((double)(k) + 2.0) * 0x1p-48)
 #define VMB_ATOL(smax) (1e-18 * (smax))
 
+enum vmb_mode { VMB_MODE_OFF = 0, VMB_MODE_AUTO, VMB_MODE_FORCE };
+
+/* Wall-time phases of the most recent GPU attempt, in seconds. gpu is the
+   command-buffer execution interval from Metal timestamps (0 if unavailable);
+   wait is host time blocked in waitUntilCompleted; finish covers validation,
+   optional shadow check and the write into C; total spans the whole attempt. */
+struct vmb_timing {
+    double pack, encode, gpu, wait, unpack, finish, total;
+};
+
 /* Reference-BLAS ZGEMM entry point (interposed). */
 void zgemm_(const char *transa, const char *transb, const int *m, const int *n,
             const int *k, const double *alpha, const double *a, const int *lda,
             const double *b, const int *ldb, const double *beta, double *c,
             const int *ldc, size_t len_transa, size_t len_transb);
 
-/* Try the GPU path regardless of VMB_ENABLE; returns a vmb_status. */
+/* Forced GPU attempt regardless of mode (safety checks still apply). */
 int vmb_zgemm_try(char transa, char transb, int m, int n, int k,
                   const double alpha[2], const double *a, int lda,
                   const double *b, int ldb, const double beta[2], double *c,
@@ -74,6 +88,18 @@ void vmb_cpu_zgemm(char transa, char transb, int m, int n, int k,
                    const double alpha[2], const double *a, int lda,
                    const double *b, int ldb, const double beta[2], double *c,
                    int ldc);
+
+/* Worst |got - ref| / (ATOL + RTOL(k) S) over count complex elements, with
+   ATOL from max S. Fails closed: returns INFINITY for any non-finite or
+   negative input or difference, or a positive error against zero tolerance.
+   An exact match passes (0) even when the tolerance is zero. */
+double vmb_tolerance_ratio(size_t count, const double *got, const double *ref,
+                           const double *scale, int k);
+
+/* Initialize the Metal device and kernel now; returns 1 when usable. */
+int vmb_device_init(double *seconds);
+int vmb_mode(void);
+void vmb_last_timing(struct vmb_timing *out);
 
 void vmb_stats_get(uint64_t out[VMB_NSTAT]);
 void vmb_stats_reset(void);
