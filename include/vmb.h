@@ -22,6 +22,8 @@
 extern "C" {
 #endif
 
+#define VMB_VERSION "0.3.0"
+
 /* Outcome of vmb_zgemm_try. Only VMB_OK writes to C. */
 enum vmb_status {
     VMB_OK = 0,

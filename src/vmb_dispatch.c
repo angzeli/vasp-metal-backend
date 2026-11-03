@@ -46,7 +46,7 @@ static const struct region auto_regions[1] = {{0, 0, 0}};
 static const int n_auto_regions = 0;
 
 static struct {
-    int mode, check, no_device, fault;
+    int mode, check, no_device, fault, telemetry_rank;
     double min_work, max_work, max_bytes, test_auto_min_work;
     char report[1024], telemetry[1024];
 } cfg;
@@ -131,8 +131,12 @@ void vmb_config_reload(void)
     cfg.max_bytes = env_double("VMB_MAX_BYTES", 0x1p30);
     cfg.test_auto_min_work = env_double("VMB_TEST_AUTO_MIN_WORK", -1.0);
     const char *report = getenv("VMB_REPORT"), *telemetry = getenv("VMB_TELEMETRY");
+    /* "rank" selects per-rank telemetry in VMB_REPORT_DIR, never a file name;
+       the report constructor rejects it without that directory. */
+    cfg.telemetry_rank = telemetry && strcmp(telemetry, "rank") == 0;
     snprintf(cfg.report, sizeof cfg.report, "%s", report ? report : "");
-    snprintf(cfg.telemetry, sizeof cfg.telemetry, "%s", telemetry ? telemetry : "");
+    snprintf(cfg.telemetry, sizeof cfg.telemetry, "%s",
+             telemetry && !cfg.telemetry_rank ? telemetry : "");
 }
 
 /* zgemm_ exported by the loaded OpenBLAS image. RTLD_NEXT is not used: the
@@ -498,7 +502,7 @@ void zgemm_(const char *transa, const char *transb, const int *m, const int *n,
     uint64_t t2 = clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
     if (status != VMB_OK)
         cpu_ns += t2 - t1;
-    if (cfg.telemetry[0]) {
+    if (cfg.telemetry[0] || (cfg.telemetry_rank && vmb_rank_telemetry())) {
         struct vmb_shape shape = {
             .m = *m, .n = *n, .k = *k, .lda = *lda, .ldb = *ldb, .ldc = *ldc,
             .ta = *transa, .tb = *transb,
@@ -563,6 +567,23 @@ double vmb_stats_max_check_ratio(void) { return max_check_ratio; }
 
 const char *vmb_device_name(void) { return vmb_gpu_device_name(); }
 
+const char *vmb_mode_name(int mode) { return mode_names[mode]; }
+
+const char *vmb_status_name(int status) { return status_names[status]; }
+
+/* Counters are read under gpu_lock so that a GPU attempt is seen whole. */
+void vmb_snapshot_get(struct vmb_snapshot *out)
+{
+    pthread_mutex_lock(&gpu_lock);
+    out->mode = cfg.mode;
+    out->check = cfg.check;
+    for (int i = 0; i < VMB_NSTAT; i++)
+        out->stats[i] = stats[i];
+    out->max_check_ratio = max_check_ratio;
+    out->cpu_library = cpu_library;
+    pthread_mutex_unlock(&gpu_lock);
+}
+
 const char *vmb_cpu_library(void)
 {
     pthread_once(&init_once, init);
@@ -576,7 +597,7 @@ void vmb_report(FILE *out)
     };
     const char *dev = vmb_gpu_device_name();
     const char *err = vmb_gpu_init_error();
-    fprintf(out, "vmb.version=0.2\nvmb.mode=%s\nvmb.enabled=%d\nvmb.check=%d\nvmb.min_work=%.17g\n",
+    fprintf(out, "vmb.version=0.3\nvmb.mode=%s\nvmb.enabled=%d\nvmb.check=%d\nvmb.min_work=%.17g\n",
             mode_names[cfg.mode], cfg.mode != VMB_MODE_OFF, cfg.check, cfg.min_work);
     fprintf(out, "vmb.device=%s\n", dev ? dev : "none");
     if (err && *err)

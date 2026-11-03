@@ -68,12 +68,18 @@ out:
 
 void vmb_telemetry_write(const char *path)
 {
-    static const char *const beta_names[3] = {"zero", "one", "other"};
     FILE *out = fopen(path, "w");
     if (!out) {
         fprintf(stderr, "vmb: cannot write telemetry to %s\n", path);
         return;
     }
+    vmb_telemetry_write_stream(out);
+    fclose(out);
+}
+
+uint64_t vmb_telemetry_write_stream(FILE *out)
+{
+    static const char *const beta_names[3] = {"zero", "one", "other"};
     pthread_mutex_lock(&lock);
     fprintf(out, "# vmb shape telemetry v1; times are seconds per zgemm_ call (host entry "
                  "to return); dropped_shapes=%llu\n", (unsigned long long)dropped);
@@ -88,6 +94,7 @@ void vmb_telemetry_write(const char *path)
                 e->shape.ldb, e->shape.ldc, beta_names[e->shape.beta_class], e->status,
                 (unsigned long long)e->count, e->total, e->min, e->max);
     }
+    uint64_t n_dropped = dropped;
     pthread_mutex_unlock(&lock);
-    fclose(out);
+    return n_dropped;
 }

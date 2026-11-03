@@ -13,12 +13,18 @@ licensed VASP objects are relinked privately and never leave the local machine.
 
 ## Status
 
-| | v0.1 (`d3be811`) | v0.2 (final safety fix `afb272e`) |
-| --- | --- | --- |
-| Standalone correctness | verified | **passed** at `afb272e`: 138 C cases, 12 Fortran ABI calls, 15 run-comparison cases |
-| Private relink | verified | verified (link only, `0344fdb` build) |
-| VASP integration | **verified** on Si2: 802/802 GPU results consumed, same TOTEN | **verified on the earlier `0344fdb` build** (Si2: 802/802 consumed, 0 shadow failures, 0 range fallbacks, same TOTEN); **`afb272e` not VASP-tested** |
-| VASP performance acceleration | not established | **not established**; synthetic benchmarks exploratory only (busy host) |
+| | v0.1 (`d3be811`) | v0.2 (final safety fix `afb272e`) | v0.3 (unreleased) |
+| --- | --- | --- | --- |
+| Standalone correctness | verified | **passed** at `afb272e`: 138 C cases, 12 Fortran ABI calls, 15 run-comparison cases | numerical gates unchanged and passing; per-rank report and aggregation tests added |
+| Private relink | verified | verified (link only, `0344fdb` build) | link-only relink on the Mac mini with the port's toolchain convention |
+| VASP integration | **verified** on Si2: 802/802 GPU results consumed, same TOTEN | **verified on the earlier `0344fdb` build** (Si2: 802/802 consumed, 0 shadow failures, 0 range fallbacks, same TOTEN); **`afb272e` not VASP-tested** | 16-rank managed qualification: see [docs/RESULTS-v0.3.md](docs/RESULTS-v0.3.md) |
+| VASP performance acceleration | not established | **not established**; synthetic benchmarks exploratory only (busy host) | **not established** |
+
+v0.3 adds managed 16-rank execution evidence. Each MPI rank writes its own
+versioned report, `scripts/vmb_evidence.py` aggregates them strictly, and the
+VASP port's runner selects the relinked binary only through a reviewed, pinned
+manifest. The contract is in [docs/CONTRACT-v0.3.md](docs/CONTRACT-v0.3.md),
+and the changes are listed in [CHANGELOG.md](CHANGELOG.md).
 
 - **Correctness is not speedup.** The verified Si2 integrations show that GPU
   results can feed a converging SCF without changing the energy. At those sizes
@@ -78,8 +84,8 @@ Requires Apple Silicon, the Command Line Tools (clang, Metal framework), Homebre
 GCC 16.1 gfortran and OpenBLAS 0.3.34 at the paths in the `Makefile`.
 
 ```sh
-make -j1 all
-make -j1 test
+make -j1 all                    # or: make -j1 PORT_ROOT=/path/to/vasp-port all
+make -j1 test                   # numerical, Fortran ABI and per-rank report tests
 python3 -B tests/test_compare_runs.py
 ```
 
@@ -100,9 +106,13 @@ the run reports per-phase medians and quartiles.
 ## Use with a private VASP build
 
 ```sh
-scripts/relink-vasp.sh /path/to/vasp/build/std private/relink-NEW
+scripts/relink-vasp.sh --port-root /path/to/vasp-port /path/to/vasp/build/std private/relink-NEW
 VMB_MODE=force VMB_REPORT=vmb-report.txt mpirun -np 1 private/relink-NEW/vasp_std_vmb
 ```
+
+For managed MPI runs, the VASP port's runner selects the relinked binary through
+a reviewed manifest, written by `scripts/make-binary-manifest.py`, and sets the
+per-rank variables itself (contract section C).
 
 `scripts/run_si2.py --backend off|auto|force` stages a private Si2 case and
 performs one bounded launch: 1 rank, one library thread, NCORE = KPAR = 1, 60 s
@@ -117,8 +127,11 @@ group, no retries.
 | `VMB_MODE` | `off` | `off`, `auto` (measured regions only; none yet) or `force` (validation) |
 | `VMB_ENABLE` | off | v0.1 switch; `1` means `force` when `VMB_MODE` is unset |
 | `VMB_CHECK` | off | `1` compares every GPU result with OpenBLAS before use (fails closed) |
-| `VMB_REPORT` | none | file path (or `stderr`) for the exit report; single rank |
-| `VMB_TELEMETRY` | none | file path for aggregated shape telemetry (no values or addresses) |
+| `VMB_REPORT` | none | file path (or `stderr`) for the exit report; single process only (refused when the world size is above 1) |
+| `VMB_TELEMETRY` | none | file path for aggregated shape telemetry (no values or addresses); `rank` with `VMB_REPORT_DIR` |
+| `VMB_REPORT_DIR` | none | v0.3 per-rank route: private directory receiving one claim and one report per rank |
+| `VMB_ATTEMPT_ID` | none | required with `VMB_REPORT_DIR`; binds every report to one attempt |
+| `VMB_EXPECT_WORLD_SIZE` | none | optional; must equal the launcher's world size |
 | `VMB_MIN_WORK` | 0 | minimum m·n·k sent to the GPU |
 | `VMB_MAX_WORK` | 2^34 | maximum m·n·k sent to the GPU |
 | `VMB_MAX_BYTES` | 2^30 | maximum packed buffer size |
@@ -128,7 +141,8 @@ group, no retries.
 
 - `build/test_zgemm`: 138 cases.
 - `build/test_fortran_abi`: 12 calls, against a quad-precision oracle.
-- `tests/test_compare_runs.py`: 15 cases.
+- `tests/test_rank_reports.py`: 13 cases (v0.3 per-rank route and aggregation).
+- `tests/test_compare_runs.py`: 20 cases (15 single-rank, 5 multi-rank).
 
 All pass. The tolerance per element, fixed before testing, is
 `1e-18·max S + 8(k+2)·2^-48·S_ij`.
@@ -155,8 +169,11 @@ Repeated GPU calls are bitwise deterministic.
 
 ## Limitations
 
-- One operation (ZGEMM). VASP is tested on one tiny system (Si2) with one
-  rank only. `VMB_REPORT` and `VMB_TELEMETRY` are not rank-aware.
+- One operation (ZGEMM). VASP integration has been tested only on one tiny
+  system (Si2).
+- The per-rank route supports Open MPI launches only; other launchers are not
+  yet scoped. The literal `VMB_REPORT` and `VMB_TELEMETRY` paths remain
+  single-process only.
 - Float-float arithmetic is not IEEE FP64; see the tolerance policy. The range
   envelope is conservative.
 - Timing so far is exploratory: busy host, single-thread CPU baseline,

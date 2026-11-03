@@ -2,6 +2,10 @@
 #define VMB_INTERNAL_H
 
 #include <stddef.h>
+#include <stdint.h>
+#include <stdio.h>
+
+#include "vmb.h"
 
 /*
  * One GPU GEMM. Matrices are pre-scaled by exact powers of two so that every
@@ -41,7 +45,25 @@ struct vmb_shape {
 };
 void vmb_telemetry_record(const struct vmb_shape *shape, int status, double seconds);
 void vmb_telemetry_write(const char *path);
+/* Writes the table to an open stream; returns the dropped-shape count. */
+uint64_t vmb_telemetry_write_stream(FILE *out);
 
 double vmb_now(void);            /* monotonic seconds */
+
+/* Consistent view of the process counters for the rank report. cpu_library is
+   "" until the first call resolves OpenBLAS; nothing here initialises Metal. */
+struct vmb_snapshot {
+    int mode, check;
+    uint64_t stats[VMB_NSTAT];
+    double max_check_ratio;
+    const char *cpu_library;
+};
+void vmb_snapshot_get(struct vmb_snapshot *out);
+const char *vmb_mode_name(int mode);
+const char *vmb_status_name(int status);
+
+/* Per-rank report route (VMB_REPORT_DIR, docs/CONTRACT-v0.3.md). Configured in a
+   library constructor; 1 when per-rank telemetry is to be recorded. */
+int vmb_rank_telemetry(void);
 
 #endif
