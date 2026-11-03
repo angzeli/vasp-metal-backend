@@ -2,11 +2,15 @@
 """Compare a backend-off and a backend-on VASP run and classify the result.
 
 Reads only run metadata, energies, iteration counts, convergence messages,
-forces and the backend's own report. Staged inputs are compared by digest; no
-input content is printed. Classes:
+forces, stress and the backend's own reports. Staged inputs are compared by
+digest; no input content is printed. A run directory is either a v0.1/v0.2
+single-rank run (run-meta.txt, vmb-report.txt) or a v0.3 run made by the VASP
+port's managed runner (RUN_METADATA.txt, vmb-reports/), whose per-rank reports
+are aggregated by scripts/vmb_evidence.py, the one acceptance model. Classes:
 
   VASP-verified        both runs valid, the on-run consumed GPU results, the
-                       shadow check (if enabled) never failed, and
+                       shadow check (if enabled) never failed, multi-rank
+                       evidence is complete for every rank, and
                        |dTOTEN| / N_atoms <= 1e-5 eV/atom
   CPU-only consistent  both runs valid, the on-run was in auto mode and served
                        every call on the CPU (a valid run, not GPU integration)
@@ -15,10 +19,15 @@ input content is printed. Classes:
 Exit status: 0 VASP-verified, 3 CPU-only consistent, 1 FAILED.
 """
 import hashlib
+import importlib.util
 import math
 import re
 import sys
 from pathlib import Path
+
+_spec = importlib.util.spec_from_file_location('vmb_evidence', Path(__file__).with_name('vmb_evidence.py'))
+vmb_evidence = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(vmb_evidence)
 
 THRESHOLD = 1e-5  # eV/atom
 INPUTS = ('INCAR', 'POSCAR', 'KPOINTS', 'POTCAR')
@@ -35,12 +44,28 @@ def read_kv(path):
     return out
 
 
+def read_metadata(path):
+    """RUN_METADATA.txt of the port runner: 'key: value' lines, last value wins."""
+    out = {}
+    if path.exists():
+        for line in path.read_text(errors='replace').splitlines():
+            key, sep, value = line.partition(': ')
+            if sep:
+                out[key] = value
+    return out
+
+
 def parse(run):
     run = Path(run)
     r = {'dir': run, 'problems': []}
-    meta = read_kv(run / 'run-meta.txt')
-    r['exit'] = meta.get('exit')
-    r['reason'] = meta.get('reason')
+    if (run / 'RUN_METADATA.txt').exists():
+        meta = read_metadata(run / 'RUN_METADATA.txt')
+        r['exit'], r['reason'] = meta.get('launcher_status'), meta.get('reason')
+        r['metadata'] = meta
+    else:
+        meta = read_kv(run / 'run-meta.txt')
+        r['exit'], r['reason'] = meta.get('exit'), meta.get('reason')
+        r['metadata'] = {}
     outcar = (run / 'OUTCAR').read_text(errors='replace') if (run / 'OUTCAR').exists() else ''
     lines = (run / 'POSCAR').read_text().splitlines() if (run / 'POSCAR').exists() else []
     try:
@@ -51,6 +76,13 @@ def parse(run):
     r['toten'] = float(toten[-1]) if toten else None
     nelm = re.search(r'NELM\s*=\s*(\d+)', outcar)
     r['nelm'] = int(nelm.group(1)) if nelm else None
+    nbands = re.findall(r'NBANDS\s*=\s*(\d+)', outcar)
+    r['nbands'] = int(nbands[-1]) if nbands else None
+    stress = re.findall(r'^\s*in kB((?:\s+\S+){6})\s*$', outcar, re.M)
+    try:
+        r['stress'] = [float(x) for x in stress[-1].split()] if stress else None
+    except ValueError:
+        r['stress'] = [math.nan] * 6
     oszicar = (run / 'OSZICAR').read_text().splitlines() if (run / 'OSZICAR').exists() else []
     r['iterations'] = sum(1 for line in oszicar if STEP.match(line))
     r['ediff_reached'] = 'aborting loop because EDIFF is reached' in outcar
@@ -71,7 +103,30 @@ def parse(run):
     r['digests'] = {name: hashlib.sha256((run / name).read_bytes()).hexdigest()
                     if (run / name).exists() else None for name in INPUTS}
     r['report'] = read_kv(run / 'vmb-report.txt')
+    r['evidence'] = None
+    if (run / 'vmb-reports').is_dir():
+        meta = r['metadata']
+        attempt = meta.get('backend_attempt_id', '').partition(';')[0]
+        ranks = re.search(r'ranks=(\d+)', meta.get('mpi', ''))
+        world = int(ranks.group(1)) if ranks else 0
+        r['evidence'] = vmb_evidence.aggregate(
+            run / 'vmb-reports', attempt, world, mode=meta.get('backend_mode') or None,
+            check={'True': True, 'False': False}.get(meta.get('backend_check')))
     return r
+
+
+def counters_multi(ev):
+    """Counters dictionary of an aggregated multi-rank attempt."""
+    totals, statuses = ev['totals'] or {}, ev['statuses'] or {}
+    ratio = ev['max_check_ratio']
+    return {'calls': totals.get('calls', 0), 'submitted': totals.get('gpu_submitted', 0),
+            'completed': totals.get('gpu_completed', 0), 'consumed': totals.get('consumed', 0),
+            'cpu': totals.get('cpu_calls', 0), 'checked': totals.get('checked', 0),
+            'check': ev['check'] is True, 'mode': ev['mode'], 'statuses': statuses,
+            'ratio': math.inf if ratio == 'nonfinite' else 0.0 if ratio is None else float(ratio),
+            'evidence': ev['evidence'], 'ranks': len(ev['ranks_reported']),
+            'ranks_with_consumed': len(ev['ranks_with_consumed']), 'shadow': ev['shadow_check'],
+            'gpu_qualified': ev['gpu_qualified']}
 
 
 def counters(rep):
@@ -101,6 +156,17 @@ def check_run(name, r):
         p.append(f'{name}: incomplete forces ({len(r["forces"])} of {r["natoms"]} atoms)')
     elif not all(math.isfinite(x) for f in r['forces'] for x in f):
         p.append(f'{name}: non-finite force component')
+    if r['stress'] is not None and not all(math.isfinite(x) for x in r['stress']):
+        p.append(f'{name}: non-finite stress component')
+    if r['evidence'] is not None:
+        ev = r['evidence']
+        c = counters_multi(ev)
+        if ev['evidence'] != 'COMPLETE':
+            p.append(f"{name}: backend evidence {ev['evidence']}: missing ranks {ev['missing_ranks']}; "
+                     + '; '.join(ev['problems'][:5]))
+        if ev['shadow_check'] == 'FAILED':
+            p.append(f'{name}: shadow check failed')
+        return p, c  # per-rank invariants were checked before aggregation
     if not r['report']:
         p.append(f'{name}: backend report missing')
         return p, None
@@ -145,7 +211,12 @@ def compare(off_dir, on_dir):
             problems.append(f'|dTOTEN|/N_atoms = {delta:.3e} exceeds {THRESHOLD:.0e}')
     if off['forces'] and len(off['forces']) == len(on['forces']):
         fdiff = max(abs(a - b) for fa, fb in zip(off['forces'], on['forces']) for a, b in zip(fa, fb))
-    active = bool(c_on and c_on['consumed'] > 0)
+    sdiff = math.nan
+    if off['stress'] and on['stress']:
+        sdiff = max(abs(a - b) for a, b in zip(off['stress'], on['stress']))
+    if off.get('nbands') != on.get('nbands'):
+        problems.append(f"effective NBANDS differ ({off.get('nbands')} vs {on.get('nbands')})")
+    active = bool(c_on and c_on['consumed'] > 0 and c_on.get('gpu_qualified', True))
     if problems:
         verdict = 'FAILED'
     elif active:
@@ -156,7 +227,7 @@ def compare(off_dir, on_dir):
         verdict = 'FAILED'
         problems.append('on-run consumed no GPU result and was not an auto-mode run')
     return {'off': off, 'on': on, 'c_off': c_off, 'c_on': c_on, 'delta': delta,
-            'fdiff': fdiff, 'verdict': verdict, 'problems': problems}
+            'fdiff': fdiff, 'sdiff': sdiff, 'verdict': verdict, 'problems': problems}
 
 
 def main(off_dir, on_dir):
@@ -164,7 +235,8 @@ def main(off_dir, on_dir):
     for name in ('off', 'on'):
         r, c = res[name], res['c_' + name]
         print(f'{name}: exit={r["exit"]} TOTEN={r["toten"]} eV iterations={r["iterations"]} '
-              f'converged={r["converged"]} normal_end={r["normal_end"]} forces={len(r["forces"])}')
+              f'converged={r["converged"]} normal_end={r["normal_end"]} forces={len(r["forces"])} '
+              f'NBANDS={r["nbands"]}')
         if c:
             s = c['statuses']
             print(f'{name}: mode={c["mode"]} calls={c["calls"]} submitted={c["submitted"]} '
@@ -172,9 +244,14 @@ def main(off_dir, on_dir):
                   f'checked={c["checked"]} check_failed={s.get("check_failed", 0)} '
                   f'range={s.get("range", 0)} auto_cpu={s.get("auto_cpu", 0)} '
                   f'max_check_ratio={c["ratio"]:.3e}')
+            if 'evidence' in c:
+                print(f'{name}: evidence={c["evidence"]} ranks={c["ranks"]} '
+                      f'ranks_with_consumed={c["ranks_with_consumed"]} shadow={c["shadow"]} '
+                      f'gpu_qualified={c["gpu_qualified"]}')
     print(f'inputs matched: {not any("inputs differ" in p for p in res["problems"])}')
     print(f'|dTOTEN|/N_atoms = {res["delta"]:.3e} eV/atom (threshold {THRESHOLD:.0e})')
     print(f'max |dF| component = {res["fdiff"]:.3e} eV/A')
+    print(f'max |dstress| component = {res["sdiff"]:.3e} kB')
     for p in res['problems']:
         print('PROBLEM:', p)
     print('VERDICT:', res['verdict'])

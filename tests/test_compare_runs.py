@@ -5,6 +5,7 @@ Every fixture file is invented placeholder text that only mimics the handful of
 output lines the parser reads; no scientific input or output is used.
 """
 import importlib.util
+import json
 import math
 import tempfile
 import unittest
@@ -143,6 +144,93 @@ class CompareRunsTest(unittest.TestCase):
         off01['vmb.enabled'] = '0'
         res = self.run_pair(off={'report': off01}, on={'report': v01})
         self.assertEqual(res['verdict'], 'VASP-verified', res['problems'])
+
+
+STATUSES = ('ok', 'disabled', 'trivial', 'badarg', 'nonfinite', 'too_small', 'too_large',
+            'no_device', 'gpu_error', 'gpu_nonfinite', 'check_failed', 'range', 'auto_cpu')
+
+
+def write_multi(path, mode, world=4, consumed_ranks=(0, 2), skip=(), attempt='att1', meta_attempt=None):
+    """Add a v0.3 managed-runner record and synthetic rank reports to a run."""
+    (path / 'run-meta.txt').unlink()
+    (path / 'vmb-report.txt').unlink()
+    check = mode == 'force'
+    (path / 'RUN_METADATA.txt').write_text(
+        f'state: STAGING\nmpi: /x/mpirun; mpirun (Open MPI) 5.0.11; mode=native (from command line); '
+        f'ranks={world}\nbackend_mode: {mode}\nbackend_check: {check}\n'
+        f'backend_attempt_id: {meta_attempt or attempt}; origin=cmw\nreason: completed\nlauncher_status: 0\n'
+        'state: FINISHED\n')
+    reports = path / 'vmb-reports'
+    reports.mkdir(mode=0o700)
+    for rank in range(world):
+        pid = 100 + rank
+        (reports / f'rank-{rank:05d}.claim.json').write_text(json.dumps(
+            {'schema': 'vmb.rank-claim.v1', 'attempt_id': attempt, 'rank': rank,
+             'world_size': world, 'pid': pid, 'start_unix': 10.0}))
+        if rank in skip:
+            continue
+        used = 1 if mode == 'force' and rank in consumed_ranks else 0
+        statuses = dict.fromkeys(STATUSES, 0)
+        statuses['ok'] = used
+        statuses['disabled' if mode == 'off' else 'range'] = 2 - used
+        report = {'schema': 'vmb.rank-report.v1', 'complete': True,
+                  'backend': {'name': 'vasp-metal-backend', 'version': '0.3.0', 'source_commit': 'c',
+                              'source_digest': 'd', 'source_dirty': False},
+                  'attempt_id': attempt, 'rank': rank, 'world_size': world,
+                  'process': {'pid': pid, 'hostname': 'h', 'executable': '/x/vasp_std_vmb',
+                              'executable_stat': [1, 2, 3, 4]},
+                  'times': {'start_unix': 10.0, 'end_unix': 11.0}, 'mode': mode, 'check': check,
+                  'counters': {'calls': 2, 'gpu_submitted': used, 'gpu_completed': used,
+                               'consumed': used, 'cpu_calls': 2 - used,
+                               'checked': used if check else 0},
+                  'statuses': statuses,
+                  'max_check_ratio': 0.01 if used and check else None,
+                  'max_check_ratio_state': 'finite' if used and check else 'none', 'telemetry': None}
+        (reports / f'rank-{rank:05d}.report.json').write_text(json.dumps(report))
+
+
+class MultiRankCompareTest(CompareRunsTest):
+    def run_multi(self, on_kw=None, outcar_extra=None):
+        write_run(self.root / 'off')
+        write_run(self.root / 'on')
+        write_multi(self.root / 'off', 'off')
+        write_multi(self.root / 'on', 'force', **(on_kw or {}))
+        if outcar_extra:
+            outcar = self.root / 'on' / 'OUTCAR'
+            outcar.write_text(outcar.read_text() + outcar_extra)
+        return compare_runs.compare(self.root / 'off', self.root / 'on')
+
+    def test_complete_multi_rank_verified(self):
+        res = self.run_multi()
+        self.assertEqual(res['verdict'], 'VASP-verified', res['problems'])
+        self.assertEqual((res['c_on']['consumed'], res['c_on']['ranks']), (2, 4))
+        self.assertEqual(res['c_off']['mode'], 'off')
+
+    def test_missing_rank_fails(self):
+        self.assertFails(self.run_multi({'skip': (3,)}), 'backend evidence INCOMPLETE')
+
+    def test_mixed_attempt_fails(self):
+        self.assertFails(self.run_multi({'meta_attempt': 'other'}), 'backend evidence INVALID')
+
+    def test_cpu_only_force_run_is_not_verified(self):
+        self.assertFails(self.run_multi({'consumed_ranks': ()}), 'consumed no GPU result')
+
+    def test_nbands_mismatch_fails(self):
+        write_run(self.root / 'off')
+        write_run(self.root / 'on')
+        for name, bands in (('off', 8), ('on', 16)):
+            outcar = self.root / name / 'OUTCAR'
+            outcar.write_text(f'   NBANDS=     {bands}\n' + outcar.read_text())
+        res = compare_runs.compare(self.root / 'off', self.root / 'on')
+        self.assertFails(res, 'effective NBANDS differ')
+
+    # The inherited single-rank cases run again here; keep this class focused.
+    test_active_gpu_verified = test_auto_all_cpu_is_valid_but_not_integration = None
+    test_force_mode_without_gpu_results_fails = test_abnormal_exit = None
+    test_missing_normal_termination = test_not_converged = test_nonfinite_force = None
+    test_incomplete_forces = test_mismatched_inputs = test_inconsistent_counters = None
+    test_shadow_check_failures = test_energy_difference = test_off_run_must_not_use_gpu = None
+    test_missing_report = test_v01_report_format = None
 
 
 if __name__ == '__main__':
