@@ -20,6 +20,17 @@ licensed VASP objects are relinked privately and never leave the local machine.
 | VASP integration | **verified** on Si2: 802/802 GPU results consumed, same TOTEN | **verified on the earlier `0344fdb` build** (Si2: 802/802 consumed, 0 shadow failures, 0 range fallbacks, same TOTEN); **`afb272e` not VASP-tested** | 16-rank managed qualification: see [docs/RESULTS-v0.3.md](docs/RESULTS-v0.3.md) |
 | VASP performance acceleration | not established | **not established**; synthetic benchmarks exploratory only (busy host) | **not established** |
 
+**Companion repositories.** Relinking and managed runs use the VASP port
+[angzeli/vasp-6.6.1-macos-arm64-port](https://github.com/angzeli/vasp-6.6.1-macos-arm64-port)
+(toolchain convention, managed runner, reviewed binary manifests). Managed jobs
+and evidence binding use CMW,
+[angzeli/computational-modelling-workflow](https://github.com/angzeli/computational-modelling-workflow).
+Both expect separately licensed VASP and potentials supplied locally.
+
+"VASP-verified" in these documents means only that `scripts/compare_runs.py`
+accepted a backend-off and backend-on pair of the Si2 fixture (correctness and
+dispatch). It is not general validation.
+
 v0.3 adds managed 16-rank execution evidence. Each MPI rank writes its own
 versioned report, `scripts/vmb_evidence.py` aggregates them strictly, and the
 VASP port's runner selects the relinked binary only through a reviewed, pinned

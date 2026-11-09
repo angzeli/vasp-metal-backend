@@ -79,8 +79,8 @@ the rank is claimed, without initialising Metal.
 ## 4. Si2 16-rank qualification (relinked binary, backend off vs force)
 
 **Setup.**
-- **Launches:** two, through a dedicated CMW queue (`vmb-v03-qual-20261102`),
-  separate from TiO2. Each was gated on normal memory pressure and no other VASP
+- **Launches:** two, through a dedicated CMW qualification queue, separate
+  from TiO2. Each was gated on normal memory pressure and no other VASP
   process, and logged in a ledger capped at two. Each had a 120 s limit and no
   retries.
 - **Delay:** the mini was first occupied by another session's 16-rank research
@@ -95,7 +95,7 @@ the rank is claimed, without initialising Metal.
 - **Attempt binding:** each run's reports are bound to its CMW attempt
   (`origin=cmw`).
 
-| | Backend off (J3.1) | Force, `VMB_CHECK=1` (J4.1) |
+| | Backend off | Force, `VMB_CHECK=1` |
 | --- | --- | --- |
 | Exit / footer / convergence | 0 / normal / EDIFF reached | 0 / normal / EDIFF reached |
 | Electronic steps; effective NBANDS; NELECT | 12; 8; 8 | 12; 8; 8 |
@@ -125,11 +125,11 @@ its time is not GPU performance.
 ## 5. TiO2 MPI-16 GPU case: registered on Hold, not dispatched
 
 **Before registering.**
-- The benchmark queue had no active attempt (J1.1 and J2.1 were Done, both exit 0).
+- The benchmark queue had no active attempt; its two earlier CPU jobs had
+  finished with exit 0.
 - Its idle controller was stopped.
-- The same queue (`2b975d09…`) was enrolled under the new config root
-  `node-v03`, with the v0.3 runtime (`b669e67b…`). The previous config roots
-  and runtimes are untouched.
+- The same queue was enrolled under a new node configuration with the v0.3
+  CMW runtime. The previous configurations and runtimes are untouched.
 
 **Revalidation with the actual new runner and binary.**
 - The four input files are byte-identical to the plan, and `ISIF=3` is
@@ -138,11 +138,11 @@ its time is not GPU performance.
 - The static check is COMPATIBLE, and the dry run shows `force` with the check
   on and NCORE=1 / KPAR=1.
 
-**Registration.** One atomic held registration created **J3.1** (attempt
-`6f4019e4…`): 16 ranks × 1 thread, 86400 s, write scope
-`/Users/liangze/Desktop/vasp-test/outputs`. The mini (`jobs show`) and the
-MacBook portal (v0.3 observer configuration) showed the same queue, attempt,
-Hold status, ranks, binary, output path and backend configuration.
+**Registration.** One atomic held registration created the job: 16 ranks ×
+1 thread, 86400 s, with its write scope limited to a private output
+directory. The mini (`jobs show`) and the MacBook portal (v0.3 observer
+configuration) showed the same queue, attempt, Hold status, ranks, binary,
+output path and backend configuration.
 
 **Before dispatch.** Release the job only with a v0.3-capable controller.
 Older workers do not export `CMW_JOBS_ATTEMPT_ID`, and the runner refuses that
