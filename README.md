@@ -196,3 +196,7 @@ Repeated GPU calls are bitwise deterministic.
 The original work in this repository is released under the MIT License (see
 `LICENSE`). It grants no rights to VASP software, source, executables or
 PAW/POTCAR datasets.
+
+## Author
+
+[Angze Li (@angzeli)](https://github.com/angzeli)
