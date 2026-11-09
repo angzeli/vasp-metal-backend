@@ -26,6 +26,13 @@ fi
 objdir=$1
 out=$2
 root=$(cd -- "$(dirname -- "$0")/.." && pwd)
+# A relinked executable contains licensed VASP code: inside this repository it
+# may only be written under the ignored private/ directory.
+parent=$(cd -- "$(dirname -- "$out")" 2>/dev/null && pwd -P) || { echo "output parent must exist: $out" >&2; exit 2; }
+case "$parent/" in
+    "$(cd -- "$root" && pwd -P)/private/"*) ;;
+    "$(cd -- "$root" && pwd -P)/"*) echo "refusing to write a relinked VASP executable inside the repository outside private/: $out" >&2; exit 2;;
+esac
 
 PORT_GCC_VERSION=16.1.0 PORT_OPENMPI_VERSION=5.0.9 PORT_SCALAPACK_VERSION=2.2.3
 PORT_OPENBLAS_VERSION=0.3.34 PORT_FFTW_VERSION=3.3.11 PORT_TOOLCHAIN_SOURCE=built-in

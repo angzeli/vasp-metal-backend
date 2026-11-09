@@ -4,6 +4,19 @@ scratch/
 POTCAR*
 *.potcar
 
+# VASP source trees and archives must never enter this repository. The
+# filesystem is case-insensitive on macOS, so *.F also matches *.f; the
+# backend's own Fortran ABI test is re-included explicitly.
+*.F
+*.F90
+!tests/*.f90
+*.tar
+*.tar.gz
+*.tgz
+*.tar.bz2
+*.tar.xz
+*.zip
+
 # Build products and binaries
 build/
 bin/
@@ -17,6 +30,9 @@ vasp
 vasp_std
 vasp_gam
 vasp_ncl
+# Relinked executables and their link records (keep relinks under private/)
+vasp_*_vmb
+relink.txt
 
 # Logs and calculation outputs
 *.log
@@ -35,6 +51,17 @@ PROCAR
 REPORT
 vasprun.xml
 vaspout.h5
+# Scientific inputs and runner records
+INCAR
+POSCAR
+KPOINTS
+KPOINTS_OPT
+RUN_METADATA.txt
+# Backend evidence: records hostnames, PIDs and executable paths
+vmb-report*.txt
+vmb-reports/
+vmb-evidence.json
+vmb-telemetry*.tsv
 
 # OS noise
 .DS_Store
