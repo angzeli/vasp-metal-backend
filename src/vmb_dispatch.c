@@ -581,6 +581,10 @@ void vmb_snapshot_get(struct vmb_snapshot *out)
         out->stats[i] = stats[i];
     out->max_check_ratio = max_check_ratio;
     out->cpu_library = cpu_library;
+    out->try_s = try_ns * 1e-9;
+    out->cpu_s = cpu_ns * 1e-9;
+    for (int i = 0; i < 16; i++)
+        out->work_decades[i] = work_hist[i];
     pthread_mutex_unlock(&gpu_lock);
 }
 
@@ -597,7 +601,7 @@ void vmb_report(FILE *out)
     };
     const char *dev = vmb_gpu_device_name();
     const char *err = vmb_gpu_init_error();
-    fprintf(out, "vmb.version=0.3\nvmb.mode=%s\nvmb.enabled=%d\nvmb.check=%d\nvmb.min_work=%.17g\n",
+    fprintf(out, "vmb.version=0.4\nvmb.mode=%s\nvmb.enabled=%d\nvmb.check=%d\nvmb.min_work=%.17g\n",
             mode_names[cfg.mode], cfg.mode != VMB_MODE_OFF, cfg.check, cfg.min_work);
     fprintf(out, "vmb.device=%s\n", dev ? dev : "none");
     if (err && *err)
