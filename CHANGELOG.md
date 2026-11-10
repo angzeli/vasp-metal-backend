@@ -27,10 +27,15 @@ GPU can win. Numerical policy, modes and the evidence contract are unchanged;
 
 ### Findings
 
-- **TiO2 (PBE, ISIF=3 relaxation, 4–8 ranks):** ZGEMM is 4–7% of rank time, and no call
-  reaches the GPU-win region. Gate A failed, so no auto rule was considered.
-- **End-to-end timing:** off versus force timing and a correctness comparison on the same
-  relaxation are recorded in the results.
+TiO2 PBE variable-cell relaxation at 4–8 ranks, on an idle MacBook Pro M3 Max:
+- **Census:** ZGEMM is 7.0–7.6% of rank time, and no call reaches the GPU-win region.
+  Gate A failed, so `auto` stays empty.
+- **Correctness:** with every ZGEMM forced onto the GPU and the shadow check on, 4.9
+  million calls were consumed with 0 failures. The relaxation matches the CPU run
+  (VASP-verified).
+- **Timing:** forcing ZGEMM onto the GPU without the check is 2.60× slower end to end
+  (557 ± 7 s against 214 ± 2 s), from about 0.56 ms of per-call GPU latency.
+- **Profile:** FFTW is the largest library-reachable work (38–39% of busy time).
 
 ## 0.3.0 (merged, untagged)
 

@@ -17,8 +17,8 @@ licensed VASP objects are relinked privately and never leave the local machine.
 | --- | --- | --- | --- | --- |
 | Standalone correctness | verified | **passed** at `afb272e`: 138 C cases, 12 Fortran ABI calls, 15 run-comparison cases | numerical gates unchanged and passing; per-rank report and aggregation tests added | numerical gates unchanged and passing; census, profile and relaxation-comparison tests added |
 | Private relink | verified | verified (link only, `0344fdb` build) | link-only relink on the Mac mini with the port's toolchain convention | link-only relink on the MacBook (M3 Max) |
-| VASP integration | **verified** on Si2: 802/802 GPU results consumed, same TOTEN | **verified on the earlier `0344fdb` build** (Si2: 802/802 consumed, 0 shadow failures, 0 range fallbacks, same TOTEN); **`afb272e` not VASP-tested** | 16-rank managed qualification: see [docs/RESULTS-v0.3.md](docs/RESULTS-v0.3.md) | TiO2 shape census at 4–8 ranks; force-check correctness and off/force timing on a TiO2 relaxation: see [docs/RESULTS-v0.4.md](docs/RESULTS-v0.4.md) |
-| VASP performance acceleration | not established | **not established**; synthetic benchmarks exploratory only (busy host) | **not established** | **not established**; real-workload shapes do not reach the GPU-win region |
+| VASP integration | **verified** on Si2: 802/802 GPU results consumed, same TOTEN | **verified on the earlier `0344fdb` build** (Si2: 802/802 consumed, 0 shadow failures, 0 range fallbacks, same TOTEN); **`afb272e` not VASP-tested** | 16-rank managed qualification: see [docs/RESULTS-v0.3.md](docs/RESULTS-v0.3.md) | TiO2 relaxation at 8 ranks: forced GPU results VASP-verified (4.9M calls, 0 shadow failures): see [docs/RESULTS-v0.4.md](docs/RESULTS-v0.4.md) |
+| VASP performance acceleration | not established | **not established**; synthetic benchmarks exploratory only (busy host) | **not established** | **not established**: forcing ZGEMM onto the GPU is 2.6× slower end to end on TiO2 |
 
 **Companion repositories.** Relinking and managed runs use the VASP port
 [angzeli/vasp-6.6.1-macos-arm64-port](https://github.com/angzeli/vasp-6.6.1-macos-arm64-port)
