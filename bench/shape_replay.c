@@ -9,7 +9,11 @@
  * the timed regions. Wall-time, repetition and working-set caps are enforced.
  *
  * usage: shape_replay SHAPES SUMMARY_TSV RAW_TSV [--reps N] [--shape-seconds S]
- *                     [--total-seconds T] [--max-bytes B] [--only ID]
+ *                     [--total-seconds T] [--max-bytes B] [--only ID] [--start-at UNIX]
+ *
+ * --start-at (v0.4) waits, after device initialisation, until that wall-clock
+ * time, so several concurrent processes (scripts/run_bench.py --concurrency)
+ * begin measuring together, as ranks sharing one GPU would.
  */
 #define _DARWIN_C_SOURCE
 #include "vmb.h"
@@ -19,7 +23,9 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/time.h>
 #include <time.h>
+#include <unistd.h>
 
 int openblas_get_num_threads(void);
 char *openblas_get_config(void);
@@ -147,18 +153,20 @@ int main(int argc, char **argv)
 {
     if (argc < 4) {
         fprintf(stderr, "usage: %s SHAPES SUMMARY_TSV RAW_TSV [--reps N] [--shape-seconds S] "
-                        "[--total-seconds T] [--max-bytes B] [--only ID]\n", argv[0]);
+                        "[--total-seconds T] [--max-bytes B] [--only ID] [--start-at UNIX]\n", argv[0]);
         return 2;
     }
     int reps = 7;
     double shape_seconds = 20.0, total_seconds = 300.0, max_bytes = 128.0 * 1024 * 1024;
     const char *only = NULL;
+    double start_at = 0.0;
     for (int i = 4; i + 1 < argc; i += 2) {
         if (!strcmp(argv[i], "--reps")) reps = atoi(argv[i + 1]);
         else if (!strcmp(argv[i], "--shape-seconds")) shape_seconds = atof(argv[i + 1]);
         else if (!strcmp(argv[i], "--total-seconds")) total_seconds = atof(argv[i + 1]);
         else if (!strcmp(argv[i], "--max-bytes")) max_bytes = atof(argv[i + 1]);
         else if (!strcmp(argv[i], "--only")) only = argv[i + 1];
+        else if (!strcmp(argv[i], "--start-at")) start_at = atof(argv[i + 1]);
         else { fprintf(stderr, "unknown option %s\n", argv[i]); return 2; }
     }
     if (reps < 3 || reps > MAX_REPS) {
@@ -193,6 +201,18 @@ int main(int argc, char **argv)
     if (!have_device) {
         fprintf(stderr, "no Metal device\n");
         return 1;
+    }
+    if (start_at > 0.0) {  /* start barrier for concurrent replicas; bounded at 120 s */
+        struct timeval tv;
+        gettimeofday(&tv, NULL);
+        double wait = start_at - (tv.tv_sec + tv.tv_usec * 1e-6);
+        if (wait > 120.0) {
+            fprintf(stderr, "--start-at is more than 120 s away\n");
+            return 2;
+        }
+        if (wait > 0.0)
+            usleep((useconds_t)(wait * 1e6));
+        fprintf(sum, "# start_at=%.3f waited_s=%.3f\n", start_at, wait > 0.0 ? wait : 0.0);
     }
 
     double t_all = now();
