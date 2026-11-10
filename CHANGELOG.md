@@ -1,6 +1,38 @@
 # Changelog
 
-## 0.3.0 (unreleased)
+## 0.4.0 (unreleased)
+
+A measurement release: whether realistic VASP workloads produce ZGEMM calls the
+GPU can win. Numerical policy, modes and the evidence contract are unchanged;
+`auto` still has no regions. Results: [docs/RESULTS-v0.4.md](docs/RESULTS-v0.4.md).
+
+### Added
+
+- **Per-rank timing.** Rank reports gain optional `timing` (seconds in GPU
+  attempts and in OpenBLAS) and `work_decades` (calls per m·n·k decade). The
+  aggregator validates and sums them, and still accepts v0.3 reports. The compact
+  summary is unchanged.
+- **`scripts/vmb_shapes.py`.** A shape census of a managed run from per-rank
+  telemetry. It reconciles the calls with the attempt evidence, bins work by decade,
+  bounds the share of rank time any region rule could save, and exports observed
+  shapes for replay.
+- **`scripts/vmb_profile.py`.** Attributes the busy time of a rank sampled by macOS
+  `sample` to BLAS kernels, FFTW, MPI and VASP's own code.
+- **`run_bench.py --concurrency N`.** N `shape_replay` replicas, each with one CPU
+  thread, start together behind a barrier (`shape_replay --start-at`), modelling N
+  ranks sharing one GPU.
+- **Ionic relaxations in `compare_runs.py`.** Electronic convergence per ionic step,
+  the required-accuracy stop, step counts, and final energy, forces, stress and
+  lattice, against thresholds fixed before any run.
+
+### Findings
+
+- **TiO2 (PBE, ISIF=3 relaxation, 4–8 ranks):** ZGEMM is 4–7% of rank time, and no call
+  reaches the GPU-win region. Gate A failed, so no auto rule was considered.
+- **End-to-end timing:** off versus force timing and a correctness comparison on the same
+  relaxation are recorded in the results.
+
+## 0.3.0 (merged, untagged)
 
 Managed MPI execution and per-rank evidence. The architecture (a link-time
 `zgemm_` interposer) and the numerical policy are unchanged from 0.2, including
