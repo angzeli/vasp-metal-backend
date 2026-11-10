@@ -87,11 +87,13 @@ test: all
 	$(BUILD)/test_fortran_abi
 	python3 -B tests/test_rank_reports.py
 	python3 -B tests/test_vmb_shapes.py
+	python3 -B tests/test_vmb_profile.py
 
 test-python:
 	python3 -B tests/test_rank_reports.py
 	python3 -B tests/test_compare_runs.py
 	python3 -B tests/test_vmb_shapes.py
+	python3 -B tests/test_vmb_profile.py
 
 clean:
 	rm -rf $(BUILD)
