@@ -189,6 +189,75 @@ def write_multi(path, mode, world=4, consumed_ranks=(0, 2), skip=(), attempt='at
         (reports / f'rank-{rank:05d}.report.json').write_text(json.dumps(report))
 
 
+def write_relax(path, *, scf=(6, 4, 3), toten=-1.25, lattice=4.0, stress=1.0, force=0.01,
+                converged=True, nelm=40, report=None):
+    """Synthetic ISIF=3 relaxation record: one F= line and one EDIFF message per ionic step."""
+    write_run(path, toten=toten, nelm=nelm, forces=((0.0, 0.0, force), (0.0, 0.0, -force)), report=report)
+    oszicar, outcar = [], [f'   NELM   =     {nelm}', '   NSW    =    200']
+    for step, n in enumerate(scf, 1):
+        oszicar += [f'DAV: {i + 1} {toten} 0 0 0 0' for i in range(n)]
+        oszicar.append(f'   {step} F= {toten - 0.01 * (len(scf) - step):.8f} E0= {toten} d E= 0')
+        if n < nelm:
+            outcar.append('---- aborting loop because EDIFF is reached ----')
+    outcar += ['  in kB ' + '  '.join(f'{stress:.5f}' for _ in range(6)),
+               ' direct lattice vectors                 reciprocal lattice vectors',
+               f'   {lattice:.9f}  0.000000000  0.000000000     0.25 0.0 0.0',
+               f'   0.000000000  {lattice:.9f}  0.000000000     0.0 0.25 0.0',
+               f'   0.000000000  0.000000000  {2 * lattice:.9f}     0.0 0.0 0.125',
+               f'  free  energy   TOTEN  =       {toten:.8f} eV',
+               ' POSITION                                       TOTAL-FORCE (eV/Angst)', ' ' + '-' * 80,
+               f'      0.0 0.0 0.0     0.0  0.0  {force}', f'      0.0 0.0 0.0     0.0  0.0  {-force}',
+               ' ' + '-' * 80]
+    if converged:
+        outcar.append(' reached required accuracy - stopping structural energy minimisation')
+    outcar.append(' General timing and accounting informations for this job:')
+    (path / 'OSZICAR').write_text('\n'.join(oszicar) + '\n')
+    (path / 'OUTCAR').write_text('\n'.join(outcar) + '\n')
+
+
+class RelaxationCompareTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp.name)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def pair(self, **on):
+        write_relax(self.root / 'off', report=OFF_REPORT)
+        write_relax(self.root / 'on', **on)
+        return compare_runs.compare(self.root / 'off', self.root / 'on')
+
+    def assertFails(self, res, fragment):
+        self.assertEqual(res['verdict'], 'FAILED')
+        self.assertTrue(any(fragment in p for p in res['problems']), res['problems'])
+
+    def test_matching_relaxation_verified(self):
+        res = self.pair()
+        self.assertEqual(res['verdict'], 'VASP-verified', res['problems'])
+        self.assertTrue(res['relaxation'])
+        self.assertEqual((res['on']['scf_per_ionic'], res['ldiff']), ([6, 4, 3], 0.0))
+
+    def test_relaxation_differences_fail(self):
+        cases = [(dict(scf=(6, 4)), 'ionic step counts differ'),
+                 (dict(lattice=4.001), 'dlattice'),
+                 (dict(stress=1.5), 'dstress'),
+                 (dict(force=0.0125), 'max |dF|'),
+                 (dict(converged=False), 'did not reach the required accuracy'),
+                 (dict(scf=(6, 40, 3)), 'without electronic convergence'),
+                 (dict(toten=-1.25 + 3e-5), 'exceeds')]
+        for kwargs, fragment in cases:
+            with self.subTest(kwargs=kwargs):
+                self.tearDown()
+                self.setUp()
+                self.assertFails(self.pair(**kwargs), fragment)
+
+    def test_single_point_runs_unaffected(self):
+        write_run(self.root / 'off', report=OFF_REPORT)
+        write_run(self.root / 'on')
+        res = compare_runs.compare(self.root / 'off', self.root / 'on')
+        self.assertEqual((res['verdict'], res['relaxation']), ('VASP-verified', False))
+
 class MultiRankCompareTest(CompareRunsTest):
     def run_multi(self, on_kw=None, outcar_extra=None):
         write_run(self.root / 'off')

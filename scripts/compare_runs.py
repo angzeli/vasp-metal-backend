@@ -30,6 +30,11 @@ vmb_evidence = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(vmb_evidence)
 
 THRESHOLD = 1e-5  # eV/atom
+# Ionic relaxations (v0.4), fixed before any comparison was run.
+RELAX_FORCE = 1e-3     # eV/Angstrom, max component difference of final forces
+RELAX_STRESS = 0.1     # kB, max component difference of final stress
+RELAX_LATTICE = 1e-4   # Angstrom, max component difference of final lattice vectors
+IONIC = re.compile(r'^\s*(\d+)\s+F=\s*(\S+)')
 INPUTS = ('INCAR', 'POSCAR', 'KPOINTS', 'POTCAR')
 STEP = re.compile(r'^\s*(DAV|RMM|CG|SDA):')
 
@@ -89,6 +94,31 @@ def parse(run):
     r['normal_end'] = 'General timing and accounting' in outcar
     r['converged'] = (r['ediff_reached'] and r['nelm'] is not None
                       and 0 < r['iterations'] < r['nelm'])
+    # Ionic relaxation: one F= line per ionic step; electronic steps counted per step.
+    nsw = re.search(r'NSW\s*=\s*(\d+)', outcar)
+    ionic, scf, current = [], [], 0
+    for line in oszicar:
+        if STEP.match(line):
+            current += 1
+        found = IONIC.match(line)
+        if found:
+            try:
+                ionic.append(float(found.group(2)))
+            except ValueError:
+                ionic.append(math.nan)
+            scf.append(current)
+            current = 0
+    r['relaxation'] = bool(nsw and int(nsw.group(1)) > 0)
+    r['ionic_energies'], r['scf_per_ionic'] = ionic, scf
+    if r['relaxation']:
+        r['ionic_converged'] = 'reached required accuracy' in outcar
+        r['converged'] = (bool(ionic) and r['nelm'] is not None and all(0 < n < r['nelm'] for n in scf)
+                          and outcar.count('aborting loop because EDIFF is reached') == len(ionic))
+    lattice = re.findall(r'direct lattice vectors[^\n]*\n((?:[^\n]*\n){3})', outcar)
+    try:
+        r['lattice'] = [[float(x) for x in row.split()[:3]] for row in lattice[-1].splitlines()] if lattice else None
+    except ValueError:
+        r['lattice'] = None
     r['forces'] = []
     block = outcar.rsplit('TOTAL-FORCE (eV/Angst)', 1)
     if len(block) == 2 and r['natoms']:
@@ -149,7 +179,13 @@ def check_run(name, r):
     if not r['normal_end']:
         p.append(f'{name}: no normal-termination timing block')
     if not r['converged']:
-        p.append(f'{name}: SCF not converged ({r["iterations"]} iterations, NELM={r["nelm"]})')
+        if r.get('relaxation'):
+            p.append(f'{name}: an ionic step ended without electronic convergence '
+                     f'(electronic steps per ionic step {r["scf_per_ionic"]}, NELM={r["nelm"]})')
+        else:
+            p.append(f'{name}: SCF not converged ({r["iterations"]} iterations, NELM={r["nelm"]})')
+    if r.get('relaxation') and not r.get('ionic_converged'):
+        p.append(f'{name}: ionic relaxation did not reach the required accuracy')
     if r['toten'] is None or not math.isfinite(r['toten']):
         p.append(f'{name}: missing or non-finite TOTEN')
     if r['natoms'] is None or len(r['forces']) != r['natoms']:
@@ -216,6 +252,19 @@ def compare(off_dir, on_dir):
         sdiff = max(abs(a - b) for a, b in zip(off['stress'], on['stress']))
     if off.get('nbands') != on.get('nbands'):
         problems.append(f"effective NBANDS differ ({off.get('nbands')} vs {on.get('nbands')})")
+    ldiff = math.nan
+    relaxation = off.get('relaxation') or on.get('relaxation')
+    if relaxation:
+        if len(off['ionic_energies']) != len(on['ionic_energies']):
+            problems.append(f"ionic step counts differ ({len(off['ionic_energies'])} vs {len(on['ionic_energies'])})")
+        if not fdiff <= RELAX_FORCE:
+            problems.append(f'max |dF| = {fdiff:.3e} eV/A exceeds {RELAX_FORCE:.0e}')
+        if not sdiff <= RELAX_STRESS:
+            problems.append(f'max |dstress| = {sdiff:.3e} kB exceeds {RELAX_STRESS}')
+        if off.get('lattice') and on.get('lattice'):
+            ldiff = max(abs(a - b) for ra, rb in zip(off['lattice'], on['lattice']) for a, b in zip(ra, rb))
+        if not ldiff <= RELAX_LATTICE:
+            problems.append(f'max |dlattice| = {ldiff:.3e} A exceeds {RELAX_LATTICE:.0e} (or lattice missing)')
     active = bool(c_on and c_on['consumed'] > 0 and c_on.get('gpu_qualified', True))
     if problems:
         verdict = 'FAILED'
@@ -227,7 +276,8 @@ def compare(off_dir, on_dir):
         verdict = 'FAILED'
         problems.append('on-run consumed no GPU result and was not an auto-mode run')
     return {'off': off, 'on': on, 'c_off': c_off, 'c_on': c_on, 'delta': delta,
-            'fdiff': fdiff, 'sdiff': sdiff, 'verdict': verdict, 'problems': problems}
+            'fdiff': fdiff, 'sdiff': sdiff, 'ldiff': ldiff, 'relaxation': bool(relaxation),
+            'verdict': verdict, 'problems': problems}
 
 
 def main(off_dir, on_dir):
@@ -252,6 +302,12 @@ def main(off_dir, on_dir):
     print(f'|dTOTEN|/N_atoms = {res["delta"]:.3e} eV/atom (threshold {THRESHOLD:.0e})')
     print(f'max |dF| component = {res["fdiff"]:.3e} eV/A')
     print(f'max |dstress| component = {res["sdiff"]:.3e} kB')
+    if res['relaxation']:
+        for name in ('off', 'on'):
+            r = res[name]
+            print(f"{name}: ionic steps={len(r['ionic_energies'])} electronic per step={r['scf_per_ionic']} "
+                  f"ionic converged={r.get('ionic_converged')}")
+        print(f'max |dlattice| component = {res["ldiff"]:.3e} A')
     for p in res['problems']:
         print('PROBLEM:', p)
     print('VERDICT:', res['verdict'])
