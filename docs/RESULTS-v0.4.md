@@ -1,7 +1,8 @@
 # v0.4 results: real-workload shapes, GPU correctness and end-to-end timing
 
-**Status:** v0.4 is a measurement release on one realistic case, a TiO2 PBE variable-cell
-relaxation, run on an otherwise idle MacBook Pro.
+**Status:** v0.4 is a measurement release on one realistic system, TiO2 PBE, run on an
+otherwise idle MacBook Pro: a variable-cell relaxation, and a single point on the
+relaxed cell (§6).
 
 | Question | Result |
 | --- | --- |
@@ -10,6 +11,7 @@ relaxation, run on an otherwise idle MacBook Pro.
 | Are forced GPU results correct through a full relaxation? | **Yes.** 4,891,290 of 4,891,290 calls on the GPU, 0 shadow failures, identical ionic path (VASP-verified) |
 | End-to-end, all ZGEMM forced onto the GPU | **2.60× slower:** 557.3 ± 6.7 s against 214.1 ± 1.5 s on the CPU, every force run slower than every off run |
 | Where the time goes | FFTW 38–39%, VASP's own code 18–20%, BLAS-2 DGEMV 15–16%, MPI 11–12%, ZGEMM 7–8% |
+| Single point on the relaxed cell (§6) | Same picture: ZGEMM 8.2%, 0 calls in the region, FFTW 40–41%; forced GPU VASP-verified and 2.54× slower |
 
 **Decisions.**
 - The pre-registered Gate A (an upper bound of at least 5% inside the GPU-win region) failed.
@@ -147,9 +149,67 @@ rank, which is **about 0.56 ms per call** against 64–188 µs on a CPU core. Th
 than the 0.25 ms single-process submit-to-completion floor measured in v0.2, which
 suggests that 8 processes contending for one GPU add latency.
 
+## 6. Single point on the relaxed cell
+
+**Why.** A relaxation repeats SCF cycles from a good starting point. A single point
+from scratch weights the first, harder steps more. This checks whether that changes the
+rate-limiting step.
+
+**Case** (user-provided `tio2-pbe-sp`): the relaxed Ti4O8 cell, with the same KPOINTS,
+POTCAR, ENCUT, PREC and LREAL as §1.
+- **INCAR settings:** IBRION = −1, NSW = 0, ISTART = 0, ICHARG = 2, LVHAR = .TRUE.
+- **One title edit:** the runner's INCAR parser refuses parentheses outside comments,
+  so they were removed from the SYSTEM title, with the user's approval. SYSTEM is only
+  a label.
+- **The four refused attempts** (preflight only, no VASP launched) are kept apart from
+  the results.
+
+**Jobs.** 7 launches, all at 8 ranks, NCORE=1, KPAR=1, one at a time. All exited 0
+with complete per-rank evidence:
+- three census repeats, S1a–S1c;
+- S2, profiled;
+- S3, force-check;
+- S4, an off and force pair.
+
+NBANDS is 56, with 45 irreducible k-points. Every run converged in 16 electronic steps
+to E = −107.30644851 eV.
+
+| Measure | Result |
+| --- | --- |
+| Elapsed, off (S1a, S1b, S1c, S4-off) | 42.8, 42.6, 42.3, 44.4 s → **43.0 ± 0.9 s** |
+| VASP timers (S1a) | EDDAV 84.9%, CHARGE 4.0%, STRESS 3.5%, SETDIJ 1.3%; about 1.4 s of setup |
+| ZGEMM calls; distinct shapes | 972,376; 635, identical in all three census runs |
+| ZGEMM share of rank time | 8.2%, 8.3%, 8.3% |
+| Calls in GPU-win region | **0**; m·n·k < 1e6 for every call. Gate A fails. |
+| Top shapes | 56×8×592 and 592×8×56 (n = 8 band blocks, 46% of ZGEMM time); 256×56×56 at 185 µs |
+| Profile, S2 (2 ranks, 20 s from 15 s in) | FFTW 40.9 / 40.4%, DGEMV 15.6 / 14.9%, MPI 15.2 / 16.2%, VASP's own code 12.5 / 11.7%, BLAS gemm 8.9 / 9.2% |
+
+The census reconciles exactly with the evidence in all three runs.
+
+**Correctness, S3 against S1a.**
+- 972,376 of 972,376 calls ran on the GPU, on all 8 ranks.
+- Shadow check: 0 failures, worst err/tol 0.075.
+- ΔE, ΔF and Δstress are all 0 at printed precision. **Verdict: VASP-verified.**
+- 169.0 s, a correctness result rather than a timing.
+
+**Timing, S4.**
+- Off 44.4 s against force 112.6 s, so **2.54× slower**. The run is VASP-verified
+  (Δstress 1e-5 kB).
+- The added 68 s over about 121,500 calls per rank is **about 0.56 ms per call**, the
+  same as in the relaxation.
+- This is one pair. The three alternating pairs in §5 carry the main timing result.
+
+**Conclusion.** The rate-limiting work is the same as in the relaxation.
+- Davidson dominates. FFTW is the largest library-level piece, at about 40% of busy
+  time.
+- DGEMV and MPI follow, at about 15% each.
+- ZGEMM is a fixed, small share (about 8%) of thin calls.
+- On this system the relaxation's ionic steps do not change which work limits the run.
+
 ## Limitations
 
-- **Scope:** one system on one host. Open MPI synthetic topology, NCORE 1 or 4, KPAR 1,
+- **Scope:** one system on one host. The single point (§6) uses the same system and
+  settings. Open MPI synthetic topology, NCORE 1 or 4, KPAR 1,
   LREAL .FALSE.
 - **Host:** desktop apps were running, though no other computation. The timing
   comparison is internally controlled (alternated, same binary), not a benchmark of the
