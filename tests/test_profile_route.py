@@ -82,11 +82,14 @@ class ProfileRouteTest(unittest.TestCase):
             self.assertEqual(fftw['totals']['executes'], calls['fftw_executes'])
             self.assertEqual(sum(s['destroyed'] for s in fftw['shapes']), calls['fftw_destroys'])
             self.assertEqual(fftw['unknown_executes'], 0)
-            repeated = [s for s in fftw['shapes'] if s['kind'] == 'dft_3d']
-            self.assertEqual(len(repeated), 1)
-            self.assertEqual((repeated[0]['plans'], repeated[0]['executes'],
-                              repeated[0]['new_array_executes']), (3, 6, 3))
-            self.assertEqual(repeated[0]['n'], [6, 5, 8])
+            # One call site plans out of place and in place with ESTIMATE, and once
+            # with MEASURE; the out-of-place ESTIMATE shape is planned six times.
+            dft_3d = [s for s in fftw['shapes'] if s['kind'] == 'dft_3d']
+            self.assertEqual(len(dft_3d), 3)
+            (repeated,) = [s for s in dft_3d if s['flags'] == 64 and not s['inplace']]
+            self.assertEqual((repeated['plans'], repeated['executes'],
+                              repeated['new_array_executes']), (6, 9, 5))
+            self.assertEqual(repeated['n'], [6, 5, 8])
             for s in blas['shapes'] + fftw['shapes']:
                 self.assertEqual(s['site']['image'], 'test_blas_fftw')
                 self.assertIsInstance(s['site']['offset'], int)
@@ -122,12 +125,70 @@ class ProfileRouteTest(unittest.TestCase):
         self.assertEqual(site['runs'], [2, 1, 1, 0, 0, 0, 0, 0])
         self.assertEqual(site['site']['image'], 'test_blas_fftw')
 
+    def report(self, rank=0):
+        return json.loads((self.dir / f'rank-{rank:05d}.report.json').read_text())
+
     def test_default_build_has_no_profile(self):
         self.run_ranks(VMB_PROFILE=None)
         result = self.aggregate()
         self.assertEqual(result['evidence'], 'COMPLETE', result['problems'])
         self.assertIsNone(result['profile'])
         self.assertFalse(list(self.dir.glob('*.profile.json')))
+        self.assertIsNone(result['fftw_plan_cache'])
+        self.assertEqual(self.report()['fftw_plan_cache'],
+                         {'enabled': False, 'hits': 0, 'misses': 0, 'bypassed': 0,
+                          'entries': 0, 'live_handles': 0})
+
+    def test_plan_cache(self):
+        # Results are checked bit for bit inside the probe; here, that the cache
+        # was used as planned and is declared in the evidence.
+        for profile in ('1', None):
+            with self.subTest(profile=profile):
+                self.tearDown()
+                self.setUp()
+                calls = self.run_ranks(VMB_FFTW_PLAN_CACHE='1', VMB_PROFILE=profile)
+                result = self.aggregate()
+                self.assertEqual(result['evidence'], 'COMPLETE', result['problems'])
+                hits = calls['cache_plans'] - calls['cache_misses']
+                self.assertEqual(result['fftw_plan_cache'],
+                                 {'enabled': True, 'ranks': [0, 1], 'hits': 2 * hits,
+                                  'misses': 2 * calls['cache_misses'], 'bypassed': 0})
+                self.assertEqual(self.report()['fftw_plan_cache'],
+                                 {'enabled': True, 'hits': hits, 'misses': calls['cache_misses'],
+                                  'bypassed': 0, 'entries': calls['cache_misses'],
+                                  'live_handles': 0})
+                if profile:  # handles are tracked like FFTW's own plans
+                    fftw = self.profile()['fftw']
+                    self.assertEqual(fftw['totals']['plans'], calls['fftw_plans'])
+                    self.assertEqual(fftw['totals']['executes'], calls['fftw_executes'])
+                    self.assertEqual(fftw['unknown_executes'], 0)
+                    self.assertEqual(sum(s['destroyed'] for s in fftw['shapes']),
+                                     calls['fftw_destroys'])
+
+    def test_plan_cache_declaration_is_checked(self):
+        self.run_ranks(VMB_FFTW_PLAN_CACHE='1')
+        path = self.dir / 'rank-00001.report.json'
+        original = json.loads(path.read_text())
+        for change, message in (
+                (lambda d: d['fftw_plan_cache'].update(enabled=False), 'used while declared off'),
+                (lambda d: d['fftw_plan_cache'].update(hits=-1), 'malformed fftw_plan_cache'),
+                (lambda d: d['fftw_plan_cache'].update(extra=1), 'malformed fftw_plan_cache'),
+                (lambda d: d['fftw_plan_cache'].update(entries=99), 'entries exceed misses'),
+                (lambda d: d.update(fftw_plan_cache={'enabled': False, 'hits': 0, 'misses': 0,
+                                                     'bypassed': 0, 'entries': 0,
+                                                     'live_handles': 0}),
+                 'ranks disagree on the FFTW plan cache')):
+            doc = json.loads(json.dumps(original))
+            change(doc)
+            path.write_text(json.dumps(doc))
+            result = self.aggregate()
+            self.assertEqual(result['evidence'], 'INVALID')
+            self.assertIn(message, ' '.join(result['problems']))
+
+    def test_plan_cache_setting_is_checked(self):
+        env = env_for(self.dir, 0, 1, VMB_FFTW_PLAN_CACHE='yes')
+        code = subprocess.run([str(PROBE)], env=env, capture_output=True).returncode
+        self.assertEqual(code, CONFIG_ERROR)
 
     def test_profile_requires_rank_telemetry(self):
         env = env_for(self.dir, 0, 1, VMB_PROFILE='1', VMB_TELEMETRY=None)

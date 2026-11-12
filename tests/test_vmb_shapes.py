@@ -131,10 +131,13 @@ class CensusTest(unittest.TestCase):
         self.assertEqual(len(ops['dgemv']['per_rank_seconds']), 2)
         self.assertEqual({s['site'].split('+')[0] for s in result['blas']['sites']},
                          {'call_dgemv', 'gemm_case'})
-        repeated = [s for s in result['fftw']['shapes'] if s['kind'] == 'dft_3d']
-        self.assertEqual(len(repeated), 1)  # one problem, two ranks, one call site
-        self.assertEqual((repeated[0]['plans'], repeated[0]['executes'], repeated[0]['ranks']), (6, 12, 2))
-        self.assertEqual(result['fftw']['totals']['plans'], 12)
+        # One call site, three 3D problems (out of place and in place ESTIMATE, one
+        # MEASURE); the out-of-place one is planned six times per rank.
+        dft_3d = [s for s in result['fftw']['shapes'] if s['kind'] == 'dft_3d']
+        self.assertEqual(len(dft_3d), 3)
+        (repeated,) = [s for s in dft_3d if s['flags'] == 64 and not s['inplace']]
+        self.assertEqual((repeated['plans'], repeated['executes'], repeated['ranks']), (12, 18, 2))
+        self.assertEqual(result['fftw']['totals']['plans'], 22)
         (site,) = result['reuse']['sites']
         self.assertEqual((site['calls'], site['same_content'], site['runs'][:3]), (14, 6, [4, 2, 2]))
         # A profile file with the wrong rank is rejected, not silently merged.

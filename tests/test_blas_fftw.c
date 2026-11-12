@@ -1,8 +1,9 @@
 /* v0.5 forwarding test: the interposed dgemv_, dgemm_ and dfftw_* entry points
  * must give results bit-identical to calling OpenBLAS and FFTW directly, with
  * profiling off or on (the profile level comes from the environment through
- * the per-rank route). Prints the calls it made, for the profile checks in
- * tests/test_profile_route.py. */
+ * the per-rank route), and with the FFTW plan cache off or on
+ * (VMB_FFTW_PLAN_CACHE). Prints the calls it made, for the profile and cache
+ * checks in tests/test_profile_route.py. */
 #include <fftw3.h>
 #include <math.h>
 #include <stdio.h>
@@ -205,8 +206,66 @@ int main(void)
     check(same_bits((double *)h1, (double *)h2, 2 * nh), "dfftw_plan_dft_r2c_3d_ forwarding");
     check(same_bits(r_back1, r_back2, n3), "dfftw_plan_dft_c2r_3d_ forwarding");
 
-    printf("calls dgemv=%d dgemm=%d fftw_plans=%d fftw_executes=%d fftw_destroys=%d\n",
-           dgemv_calls, dgemm_calls, fftw_plans, fftw_execs, fftw_destroys);
+    /* Plan cache paths (each identical to FFTW with the cache off). The three
+       out-of-place ESTIMATE plans above share one cache entry. */
+    int cache_plans = 3, cache_misses = 1;
+    fftw_complex *in2 = fftw_alloc_complex(n3), *o3 = fftw_alloc_complex(n3),
+                 *o4 = fftw_alloc_complex(n3), *ref_in = fftw_alloc_complex(n3);
+    fill((double *)in2, 2 * n3, 10);
+    memcpy(ref_in, in2, sizeof(fftw_complex) * n3);
+    /* A hit planned on other arrays: dfftw_execute_ must transform those. */
+    call_plan_3d(&p1, &nx, &ny, &nz, in2, o3, &sign, &flags);
+    dfftw_execute_(&p1);
+    dfftw_destroy_plan_(&p1);
+    fftw_plans++, fftw_execs++, fftw_destroys++, cache_plans++;
+    p2 = fftw_plan_dft_3d(nz, ny, nx, in2, o4, sign, flags);
+    fftw_execute(p2);
+    fftw_destroy_plan(p2);
+    check(same_bits((double *)o3, (double *)o4, 2 * n3), "cached plan executes its own arrays");
+    /* In place: a separate problem, so a separate entry. */
+    call_plan_3d(&p1, &nx, &ny, &nz, in2, in2, &sign, &flags);
+    dfftw_execute_dft_(&p1, in2, in2);
+    dfftw_destroy_plan_(&p1);
+    fftw_plans++, fftw_execs++, fftw_destroys++, cache_plans++, cache_misses++;
+    p2 = fftw_plan_dft_3d(nz, ny, nx, ref_in, ref_in, sign, flags);
+    fftw_execute(p2);
+    fftw_destroy_plan(p2);
+    check(same_bits((double *)in2, (double *)ref_in, 2 * n3), "in-place forwarding");
+    /* Arrays 8 bytes off: another entry, then a hit on it, when this FFTW build
+       uses SIMD (fftw_alignment_of tells; without SIMD both are the same problem). */
+    int other_alignment = 0;
+    double *raw_in = fftw_alloc_real(2 * n3 + 1), *raw_out = fftw_alloc_real(2 * n3 + 1);
+    fftw_complex *mi = (fftw_complex *)(raw_in + 1), *mo = (fftw_complex *)(raw_out + 1);
+    for (int r = 0; r < 2; r++) {
+        fill((double *)mi, 2 * n3, 11 + r);
+        call_plan_3d(&p1, &nx, &ny, &nz, mi, mo, &sign, &flags);
+        dfftw_execute_dft_(&p1, mi, mo);
+        dfftw_destroy_plan_(&p1);
+        fftw_plans++, fftw_execs++, fftw_destroys++, cache_plans++;
+        if (r == 0)
+            other_alignment = fftw_alignment_of((double *)mi) != fftw_alignment_of((double *)in) ||
+                              fftw_alignment_of((double *)mo) != fftw_alignment_of((double *)o1);
+        cache_misses += r == 0 && other_alignment;
+        p2 = fftw_plan_dft_3d(nz, ny, nx, mi, o4, sign, flags | FFTW_UNALIGNED);
+        fftw_execute_dft(p2, mi, o4);
+        fftw_destroy_plan(p2);
+        char what[48];
+        snprintf(what, sizeof what, "misaligned forwarding %d", r);
+        /* FFTW_UNALIGNED and an unaligned plan both use the non-SIMD codelets. */
+        check(same_bits((double *)mo, (double *)o4, 2 * n3), what);
+    }
+    /* A MEASURE plan is never cached (planning may overwrite the arrays). */
+    int measure = FFTW_MEASURE;
+    call_plan_3d(&p1, &nx, &ny, &nz, in2, o3, &sign, &measure);
+    fill((double *)in2, 2 * n3, 13);
+    dfftw_execute_dft_(&p1, in2, o3);
+    dfftw_destroy_plan_(&p1);
+    fftw_plans++, fftw_execs++, fftw_destroys++;
+
+    printf("calls dgemv=%d dgemm=%d fftw_plans=%d fftw_executes=%d fftw_destroys=%d "
+           "cache_plans=%d cache_misses=%d\n",
+           dgemv_calls, dgemm_calls, fftw_plans, fftw_execs, fftw_destroys, cache_plans,
+           cache_misses);
     printf("%s: %d failures\n", failures ? "FAIL" : "PASS", failures);
     return failures != 0;
 }

@@ -334,6 +334,10 @@ static void write_report(FILE *out, void *arg)
     else if (profile_level != VMB_PROFILE_OFF)
         fprintf(out, " \"profile\": {\"file\": null, \"level\": \"%s\"},\n",
                 vmb_profile_level_name(profile_level));
+    /* FFTW plan cache declaration (v0.5): additive; every v0.5 report has it. */
+    fprintf(out, " \"fftw_plan_cache\": ");
+    vmb_fftw_cache_write_json(out);
+    fprintf(out, ",\n");
     if (ra->telemetry_file)
         fprintf(out, " \"telemetry\": {\"file\": \"%s\", \"dropped_shapes\": %llu}}\n",
                 ra->telemetry_file, (unsigned long long)ra->dropped);

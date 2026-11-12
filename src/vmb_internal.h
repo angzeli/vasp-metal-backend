@@ -92,5 +92,8 @@ void vmb_json_string(FILE *out, const char *s);
 /* Profile sections; each writes one JSON object and returns its dropped count. */
 uint64_t vmb_blas_write_json(FILE *out);
 uint64_t vmb_fftw_write_json(FILE *out);
+/* v0.5 opt-in FFTW plan cache (VMB_FFTW_PLAN_CACHE, build default
+   PLAN_CACHE_DEFAULT): its report section, written whether it is on or off. */
+void vmb_fftw_cache_write_json(FILE *out);
 
 #endif

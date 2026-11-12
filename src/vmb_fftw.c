@@ -5,7 +5,18 @@
  * shape (kind, sizes, batch, strides, sign, flags, in-place, call site) and the
  * table counts plans created and destroyed, planning time, executions and
  * execution time per shape. Many plans of one shape mean repeated planning.
- * No array contents or addresses are written. */
+ * No array contents or addresses are written.
+ *
+ * Opt-in plan cache (VMB_FFTW_PLAN_CACHE=1, or a build with PLAN_CACHE_DEFAULT=1).
+ * VASP plans a 3D transform with FFTW_ESTIMATE, executes it once and destroys it,
+ * every time. With the cache, dfftw_plan_dft_3d_ for an ESTIMATE plan returns a
+ * handle onto a plan kept for the problem (sizes, sign, flags, in-place or not,
+ * and the FFTW alignment of both arrays): FFTW's new-array execute rule makes
+ * one plan valid for every array pair that matches those. The handle remembers
+ * the arrays it was planned for, so dfftw_execute_ still transforms them, and
+ * destroying it releases only the handle. ESTIMATE planning never touches the
+ * arrays, so skipping it has no side effect. Everything else, and any request
+ * the bounded tables cannot hold, goes to FFTW's planner unchanged. */
 #define _DARWIN_C_SOURCE
 #include "vmb.h"
 #include "vmb_internal.h"
@@ -35,6 +46,7 @@ static const char *const exec_names[E_ENTRIES] = {
 };
 
 static void *plan_fn[K_KINDS], *exec_fn[E_ENTRIES];
+static int (*alignment_of)(double *);
 static char fftw_library[1024];
 static pthread_once_t resolve_once = PTHREAD_ONCE_INIT;
 
@@ -79,6 +91,8 @@ static void resolve(void)
                                             fftw_library, sizeof fftw_library)) != NULL;
     for (int i = 0; i < E_ENTRIES; i++)
         ok &= (exec_fn[i] = vmb_find_symbol("libfftw3.", exec_names[i], self_exec[i], NULL, 0)) != NULL;
+    ok &= (*(void **)&alignment_of = vmb_find_symbol("libfftw3.", "fftw_alignment_of", NULL,
+                                                     NULL, 0)) != NULL;
     if (!ok) {
         fprintf(stderr, "vmb: libfftw3 Fortran entry points not found among loaded images; "
                         "link libvmb.a ahead of -lfftw3\n");
@@ -233,6 +247,162 @@ static void after_exec(plan_t p, int new_array, uint64_t ticks)
     os_unfair_lock_unlock(&lock);
 }
 
+/* ---- plan cache ------------------------------------------------------------ */
+
+#ifndef VMB_PLAN_CACHE_DEFAULT
+#define VMB_PLAN_CACHE_DEFAULT 0  /* build-time default for VMB_FFTW_PLAN_CACHE */
+#endif
+#define CONFIG_ERROR 78
+/* FFTW planner flags (fftw3.h), kept here so this file needs no FFTW headers. */
+#define F_ESTIMATE (1U << 6)
+#define F_SLOW_PLANNERS ((1U << 3) | (1U << 5) | (1U << 21))  /* EXHAUSTIVE, PATIENT, WISDOM_ONLY */
+
+static int cache_on;
+
+__attribute__((constructor)) static void plan_cache_init(void)
+{
+    const char *v = getenv("VMB_FFTW_PLAN_CACHE");
+    if (!v)
+        cache_on = VMB_PLAN_CACHE_DEFAULT;
+    else if (strcmp(v, "0") == 0 || strcmp(v, "1") == 0)
+        cache_on = v[0] == '1';
+    else {
+        fprintf(stderr, "vmb: VMB_FFTW_PLAN_CACHE must be 0 or 1\n");
+        exit(CONFIG_ERROR);
+    }
+}
+
+struct cached {
+    int used, n[3], sign, flags, inplace, align_in, align_out;
+    plan_t real;
+    uint64_t live;
+};
+struct handle {
+    plan_t real;
+    void *in, *out;
+    int entry, next;
+};
+
+#define CACHED 64     /* distinct problems kept */
+#define HANDLES 1024  /* handles alive at once (VASP holds one or two) */
+static struct cached cache[CACHED];
+static struct handle handles[HANDLES];
+static int free_handle = -1, handles_ready;
+static uint64_t cache_hits, cache_misses, cache_bypassed;
+static os_unfair_lock cache_lock = OS_UNFAIR_LOCK_INIT;
+
+/* The handle behind a plan value, or NULL for one of FFTW's own plans. */
+static struct handle *as_handle(plan_t p)
+{
+    uintptr_t a = (uintptr_t)p, base = (uintptr_t)handles;
+    if (a < base || a >= base + sizeof handles || (a - base) % sizeof(struct handle))
+        return NULL;
+    return (struct handle *)p;
+}
+
+static struct handle *handle_new(void)
+{
+    if (!handles_ready) {
+        for (int i = 0; i < HANDLES; i++)
+            handles[i].next = i + 1 < HANDLES ? i + 1 : -1;
+        free_handle = 0;
+        handles_ready = 1;
+    }
+    if (free_handle < 0)
+        return NULL;
+    struct handle *h = &handles[free_handle];
+    free_handle = h->next;
+    return h;
+}
+
+static void handle_free(struct handle *h)
+{
+    h->real = NULL;
+    h->in = h->out = NULL;
+    h->next = free_handle;
+    free_handle = (int)(h - handles);
+}
+
+typedef void (*plan_3d_fn)(plan_t *, const int *, const int *, const int *, void *, void *,
+                           const int *, const int *);
+
+/* dfftw_plan_dft_3d_ through the cache. Returns 0 when the request is not
+   cacheable or does not fit, and the caller plans it with FFTW. */
+static int plan_3d_cached(plan_t *p, const int *nx, const int *ny, const int *nz, void *in,
+                          void *out, const int *sign, const int *flags)
+{
+    if (!(*flags & F_ESTIMATE) || (*flags & F_SLOW_PLANNERS))
+        return 0;
+    struct cached key = {.used = 1, .n = {*nx, *ny, *nz}, .sign = *sign, .flags = *flags,
+                         .inplace = in == out, .align_in = alignment_of(in),
+                         .align_out = alignment_of(out)};
+    os_unfair_lock_lock(&cache_lock);
+    struct handle *h = handle_new();
+    int slot = -1, empty = -1;
+    for (int i = 0; h && i < CACHED; i++) {
+        struct cached *c = &cache[i];
+        if (!c->used) {
+            if (empty < 0)
+                empty = i;
+        } else if (memcmp(c->n, key.n, sizeof key.n) == 0 && c->sign == key.sign &&
+                   c->flags == key.flags && c->inplace == key.inplace &&
+                   c->align_in == key.align_in && c->align_out == key.align_out) {
+            slot = i;
+            break;
+        }
+    }
+    if (!h || (slot < 0 && empty < 0)) {
+        if (h)
+            handle_free(h);
+        cache_bypassed++;
+        os_unfair_lock_unlock(&cache_lock);
+        return 0;
+    }
+    if (slot < 0) {
+        plan_t real = NULL;
+        ((plan_3d_fn)plan_fn[K_DFT_3D])(&real, nx, ny, nz, in, out, sign, flags);
+        if (!real) {  /* FFTW could not plan it: report that as FFTW would */
+            handle_free(h);
+            os_unfair_lock_unlock(&cache_lock);
+            *p = NULL;
+            return 1;
+        }
+        key.real = real;
+        cache[empty] = key;
+        slot = empty;
+        cache_misses++;
+    } else {
+        cache_hits++;
+    }
+    cache[slot].live++;
+    h->real = cache[slot].real;
+    h->in = in;
+    h->out = out;
+    h->entry = slot;
+    *p = (plan_t)h;
+    os_unfair_lock_unlock(&cache_lock);
+    return 1;
+}
+
+/* Report section: whether the cache is on and how it was used. */
+void vmb_fftw_cache_write_json(FILE *out)
+{
+    os_unfair_lock_lock(&cache_lock);
+    uint64_t live = 0;
+    int entries = 0;
+    for (int i = 0; i < CACHED; i++)
+        if (cache[i].used) {
+            entries++;
+            live += cache[i].live;
+        }
+    fprintf(out, "{\"enabled\": %s, \"hits\": %llu, \"misses\": %llu, \"bypassed\": %llu, "
+                 "\"entries\": %d, \"live_handles\": %llu}",
+            cache_on ? "true" : "false", (unsigned long long)cache_hits,
+            (unsigned long long)cache_misses, (unsigned long long)cache_bypassed, entries,
+            (unsigned long long)live);
+    os_unfair_lock_unlock(&cache_lock);
+}
+
 /* ---- interposers ---------------------------------------------------------- */
 
 #define PROFILING (pthread_once(&resolve_once, resolve), vmb_profile_level() != VMB_PROFILE_OFF)
@@ -269,10 +439,9 @@ void dfftw_plan_dft_1d_(plan_t *p, const int *n, void *in, void *out, const int 
 void dfftw_plan_dft_3d_(plan_t *p, const int *nx, const int *ny, const int *nz, void *in,
                         void *out, const int *sign, const int *flags)
 {
-    typedef void (*fn)(plan_t *, const int *, const int *, const int *, void *, void *,
-                       const int *, const int *);
     if (!PROFILING) {
-        ((fn)plan_fn[K_DFT_3D])(p, nx, ny, nz, in, out, sign, flags);
+        if (!cache_on || !plan_3d_cached(p, nx, ny, nz, in, out, sign, flags))
+            ((plan_3d_fn)plan_fn[K_DFT_3D])(p, nx, ny, nz, in, out, sign, flags);
         return;
     }
     struct shape s;
@@ -281,8 +450,9 @@ void dfftw_plan_dft_3d_(plan_t *p, const int *nx, const int *ny, const int *nz, 
     s.n[0] = *nx;
     s.n[1] = *ny;
     s.n[2] = *nz;
-    uint64_t t0 = vmb_ticks();
-    ((fn)plan_fn[K_DFT_3D])(p, nx, ny, nz, in, out, sign, flags);
+    uint64_t t0 = vmb_ticks();  /* with the cache, a hit's lookup time */
+    if (!cache_on || !plan_3d_cached(p, nx, ny, nz, in, out, sign, flags))
+        ((plan_3d_fn)plan_fn[K_DFT_3D])(p, nx, ny, nz, in, out, sign, flags);
     after_plan(&s, *p, vmb_ticks() - t0);
 }
 
@@ -397,27 +567,40 @@ void dfftw_plan_many_dft_c2r_(plan_t *p, const int *rank, const int *n, const in
                    ostride, odist, flags, __builtin_return_address(0));
 }
 
-void dfftw_execute_(const plan_t *p)
+/* A handle executes its kept plan on the arrays it was planned for. */
+static void execute(const plan_t *p)
 {
     typedef void (*fn)(const plan_t *);
-    if (!PROFILING) {
+    typedef void (*fn_new)(const plan_t *, void *, void *);
+    const struct handle *h = as_handle(*p);
+    if (h)
+        ((fn_new)exec_fn[E_DFT])(&h->real, h->in, h->out);
+    else
         ((fn)exec_fn[E_EXECUTE])(p);
+}
+
+void dfftw_execute_(const plan_t *p)
+{
+    if (!PROFILING) {
+        execute(p);
         return;
     }
     uint64_t t0 = vmb_ticks();
-    ((fn)exec_fn[E_EXECUTE])(p);
+    execute(p);
     after_exec(*p, 0, vmb_ticks() - t0);
 }
 
 static void exec_new(int entry, const plan_t *p, void *in, void *out)
 {
     typedef void (*fn)(const plan_t *, void *, void *);
+    const struct handle *h = as_handle(*p);
+    const plan_t *real = h ? &h->real : p;
     if (!PROFILING) {
-        ((fn)exec_fn[entry])(p, in, out);
+        ((fn)exec_fn[entry])(real, in, out);
         return;
     }
     uint64_t t0 = vmb_ticks();
-    ((fn)exec_fn[entry])(p, in, out);
+    ((fn)exec_fn[entry])(real, in, out);
     after_exec(*p, 1, vmb_ticks() - t0);
 }
 
@@ -435,7 +618,15 @@ void dfftw_destroy_plan_(plan_t *p)
             table[i].destroyed++;
         os_unfair_lock_unlock(&lock);
     }
-    ((fn)exec_fn[E_DESTROY])(p);
+    struct handle *h = as_handle(*p);
+    if (!h) {
+        ((fn)exec_fn[E_DESTROY])(p);
+        return;
+    }
+    os_unfair_lock_lock(&cache_lock);  /* the kept plan stays for the next request */
+    cache[h->entry].live--;
+    handle_free(h);
+    os_unfair_lock_unlock(&cache_lock);
 }
 
 /* ---- report section ------------------------------------------------------- */

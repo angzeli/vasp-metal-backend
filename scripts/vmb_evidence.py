@@ -158,6 +158,25 @@ def check_profile(report, profile, rank, attempt_id, world_size):
              'profile lacks its blas or fftw section')
 
 
+CACHE_COUNTS = ('hits', 'misses', 'bypassed', 'live_handles')
+
+
+def check_plan_cache(report):
+    """Optional v0.5 FFTW plan cache declaration; absent means the cache was off."""
+    record = report.get('fftw_plan_cache')
+    if record is None:
+        return False
+    _require(isinstance(record, dict) and set(record) == {'enabled', *CACHE_COUNTS, 'entries'}
+             and isinstance(record['enabled'], bool)
+             and all(type(record[k]) is int and record[k] >= 0 for k in (*CACHE_COUNTS, 'entries')),
+             'malformed fftw_plan_cache declaration')
+    if not record['enabled']:
+        _require(all(record[k] == 0 for k in (*CACHE_COUNTS, 'entries')),
+                 'fftw_plan_cache used while declared off')
+    _require(record['entries'] <= record['misses'], 'fftw_plan_cache entries exceed misses')
+    return record['enabled']
+
+
 def _shared(report):
     process = report['process']
     return {'backend': json.dumps(report['backend'], sort_keys=True), 'mode': report['mode'],
@@ -176,7 +195,7 @@ def aggregate(directory, attempt_id, world_size, *, mode=None, check=None, execu
               'ranks_with_consumed': [], 'execution': None, 'shadow_check': None,
               'gpu_qualified': False, 'backend': None, 'mode': None, 'check': None,
               'executable': None, 'hostname': None, 'timing': None, 'work_decades': None,
-              'profile': None,
+              'profile': None, 'fftw_plan_cache': None,
               'limitations': ['Counts calls made by the program through zgemm_ only.',
                               'Says nothing about speed, scientific convergence or agreement '
                               'with a reference.']}
@@ -226,7 +245,7 @@ def aggregate(directory, attempt_id, world_size, *, mode=None, check=None, execu
                 and claim.get('world_size') == world_size and type(claim.get('pid')) is int):
             problems.append(f'rank {rank}: malformed or foreign claim')
 
-    counters, statuses, ratios, consumed_ranks, shared = {}, {}, [], [], {}
+    counters, statuses, ratios, consumed_ranks, shared, cache_enabled = {}, {}, [], [], {}, {}
     for rank, report in sorted(reports.items()):
         try:
             c, s = check_rank_report(report, rank, attempt_id, world_size)
@@ -243,6 +262,7 @@ def aggregate(directory, attempt_id, world_size, *, mode=None, check=None, execu
             else:
                 _require(rank not in telemetry, 'telemetry file without a report declaration')
             check_profile(report, profiles.get(rank), rank, attempt_id, world_size)
+            cache_enabled[rank] = check_plan_cache(report)
         except EvidenceError as exc:
             problems.append(f'rank {rank}: {exc}')
             continue
@@ -285,6 +305,14 @@ def aggregate(directory, attempt_id, world_size, *, mode=None, check=None, execu
             problems.append('ranks disagree on the profile level')
         result['profile'] = {'level': sorted(set(declared.values()))[0],
                              'ranks': sorted(r for r in declared if r in profiles)}
+    cached = [r for r in counters if cache_enabled.get(r)]
+    if cached:
+        if len(cached) != len(counters):
+            problems.append('ranks disagree on the FFTW plan cache')
+        result['fftw_plan_cache'] = {
+            'enabled': True, 'ranks': cached,
+            **{k: sum(reports[r]['fftw_plan_cache'][k] for r in cached)
+               for k in ('hits', 'misses', 'bypassed')}}
     timed = [reports[r] for r in counters if reports[r].get('timing') is not None]
     if timed:
         result['timing'] = {'try_s': sum(r['timing']['try_s'] for r in timed),

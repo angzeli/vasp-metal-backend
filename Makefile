@@ -33,6 +33,8 @@ SOURCE_DIRTY  ?= $(shell test -z "$$(git status --porcelain -- src include Makef
 # port runner passes no VMB_PROFILE, so profiled VASP runs use a binary built
 # with PROFILE_DEFAULT=1 (or 2), selected by its own reviewed manifest.
 PROFILE_DEFAULT ?= 0
+# Build-time default of VMB_FFTW_PLAN_CACHE (0 off, 1 on), for the same reason.
+PLAN_CACHE_DEFAULT ?= 0
 IDENTITY  = -DVMB_PROFILE_DEFAULT=$(PROFILE_DEFAULT) -DVMB_SOURCE_COMMIT='"$(SOURCE_COMMIT)"' -DVMB_SOURCE_DIGEST='"$(SOURCE_DIGEST)"' \
             -DVMB_SOURCE_DIRTY=$(SOURCE_DIRTY)
 
@@ -66,18 +68,18 @@ $(BUILD)/vmb_telemetry.o: src/vmb_telemetry.c include/vmb.h src/vmb_internal.h |
 $(BUILD)/vmb_blas.o: src/vmb_blas.c include/vmb.h src/vmb_internal.h | $(BUILD)
 	$(CC) $(CFLAGS) -c $< -o $@
 
-$(BUILD)/vmb_fftw.o: src/vmb_fftw.c include/vmb.h src/vmb_internal.h | $(BUILD)
-	$(CC) $(CFLAGS) -c $< -o $@
+$(BUILD)/vmb_fftw.o: src/vmb_fftw.c include/vmb.h src/vmb_internal.h $(BUILD)/source-identity | $(BUILD)
+	$(CC) $(CFLAGS) -DVMB_PLAN_CACHE_DEFAULT=$(PLAN_CACHE_DEFAULT) -c $< -o $@
 
 $(BUILD)/vmb_rank_report.o: src/vmb_rank_report.c include/vmb.h src/vmb_internal.h $(BUILD)/source-identity | $(BUILD)
 	$(CC) $(CFLAGS) $(IDENTITY) -c $< -o $@
 
-# Rebuilt only when the embedded identity changes. The object is also removed,
+# Rebuilt only when the embedded identity changes. The objects are also removed,
 # because make 3.81 compares whole-second times and could keep a stale one.
 $(BUILD)/source-identity: FORCE | $(BUILD)
-	@echo '$(SOURCE_COMMIT) $(SOURCE_DIGEST) $(SOURCE_DIRTY) $(PROFILE_DEFAULT)' | cmp -s - $@ || \
-	    { echo '$(SOURCE_COMMIT) $(SOURCE_DIGEST) $(SOURCE_DIRTY) $(PROFILE_DEFAULT)' > $@; \
-	      rm -f $(BUILD)/vmb_rank_report.o; }
+	@echo '$(SOURCE_COMMIT) $(SOURCE_DIGEST) $(SOURCE_DIRTY) $(PROFILE_DEFAULT) $(PLAN_CACHE_DEFAULT)' | cmp -s - $@ || \
+	    { echo '$(SOURCE_COMMIT) $(SOURCE_DIGEST) $(SOURCE_DIRTY) $(PROFILE_DEFAULT) $(PLAN_CACHE_DEFAULT)' > $@; \
+	      rm -f $(BUILD)/vmb_rank_report.o $(BUILD)/vmb_fftw.o; }
 
 $(BUILD)/libvmb.a: $(BUILD)/vmb_dispatch.o $(BUILD)/vmb_metal.o $(BUILD)/vmb_telemetry.o \
                    $(BUILD)/vmb_rank_report.o $(BUILD)/vmb_blas.o $(BUILD)/vmb_fftw.o
