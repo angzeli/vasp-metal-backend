@@ -27,23 +27,23 @@ GPU can win. Numerical policy, modes and the evidence contract are unchanged;
 
 ### Findings
 
-TiO2 PBE variable-cell relaxation at 4–8 ranks, on an idle MacBook Pro M3 Max:
-- **Census:** ZGEMM is 7.0–7.6% of rank time, and no call reaches the GPU-win region.
-  Gate A failed, so `auto` stays empty.
-- **Correctness:** with every ZGEMM forced onto the GPU and the shadow check on, 4.9
-  million calls were consumed with 0 failures. The relaxation matches the CPU run
-  (VASP-verified).
-- **Timing:** forcing ZGEMM onto the GPU without the check is 2.60× slower end to end
-  (557 ± 7 s against 214 ± 2 s), from about 0.56 ms of per-call GPU latency.
-- **Profile:** FFTW is the largest library-reachable work (38–39% of busy time).
-- **Single point on the relaxed cell:** the same picture.
-  - ZGEMM is 8.2% of rank time, with 0 calls in the GPU-win region.
-  - FFTW is 40–41% of busy time.
-  - Forced GPU results are VASP-verified, and forcing is 2.54× slower (112.6 s against
-    44.4 s).
-- **HSE06 single point on the same cell** (CPU only, 13.5 h converged):
-  - ZGEMM falls to 0.008% of rank time, with 0 calls in the GPU-win region.
-  - FFTW (38–41%) and the Fock-exchange DGEMV (29–32%) dominate.
+Anatase TiO2 on an idle MacBook Pro M3 Max, in two parallel series. Gate A failed in
+both, so `auto` stays empty.
+- **PBE** (a variable-cell relaxation at 4–8 ranks, and a single point on the relaxed
+  cell):
+  - **Census:** ZGEMM is 7.0–8.3% of rank time, and no call reaches the GPU-win
+    region.
+  - **Correctness:** with every ZGEMM forced onto the GPU and the shadow check on, the
+    relaxation (4.9 million calls) and the single point (1.0 million) both match their
+    CPU runs, with 0 failures (VASP-verified).
+  - **Timing:** forcing ZGEMM onto the GPU without the check is 2.60× slower end to
+    end on the relaxation (557 ± 7 s against 214 ± 2 s) and 2.54× on the single point.
+    That comes from about 0.56 ms of per-call GPU latency.
+  - **Profile:** FFTW is the largest library-reachable work (38–41% of busy time).
+- **HSE06** (a hybrid single point on the same cell, CPU only, converged in 13.5 h):
+  - **Census:** ZGEMM falls to 0.008% of rank time, with 0 calls in the GPU-win
+    region, so no GPU run was made.
+  - **Profile:** FFTW (38–41%) and the exchange DGEMV (29–32%) dominate.
 
 ## 0.3.0 (merged, untagged)
 
