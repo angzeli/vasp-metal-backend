@@ -72,10 +72,12 @@ $(BUILD)/vmb_fftw.o: src/vmb_fftw.c include/vmb.h src/vmb_internal.h | $(BUILD)
 $(BUILD)/vmb_rank_report.o: src/vmb_rank_report.c include/vmb.h src/vmb_internal.h $(BUILD)/source-identity | $(BUILD)
 	$(CC) $(CFLAGS) $(IDENTITY) -c $< -o $@
 
-# Rebuilt only when the embedded identity changes.
+# Rebuilt only when the embedded identity changes. The object is also removed,
+# because make 3.81 compares whole-second times and could keep a stale one.
 $(BUILD)/source-identity: FORCE | $(BUILD)
 	@echo '$(SOURCE_COMMIT) $(SOURCE_DIGEST) $(SOURCE_DIRTY) $(PROFILE_DEFAULT)' | cmp -s - $@ || \
-	    echo '$(SOURCE_COMMIT) $(SOURCE_DIGEST) $(SOURCE_DIRTY) $(PROFILE_DEFAULT)' > $@
+	    { echo '$(SOURCE_COMMIT) $(SOURCE_DIGEST) $(SOURCE_DIRTY) $(PROFILE_DEFAULT)' > $@; \
+	      rm -f $(BUILD)/vmb_rank_report.o; }
 
 $(BUILD)/libvmb.a: $(BUILD)/vmb_dispatch.o $(BUILD)/vmb_metal.o $(BUILD)/vmb_telemetry.o \
                    $(BUILD)/vmb_rank_report.o $(BUILD)/vmb_blas.o $(BUILD)/vmb_fftw.o
