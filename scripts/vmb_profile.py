@@ -16,8 +16,9 @@ Standard library only; it only reads the files it is given.
 outside VASP's own image whose "SYMBOL (in IMAGE)" matches REGEX (for example
 'gemv' for dgemv_ and its kernels, 'libfftw3' for FFTW) is attributed, with its
 inclusive sample count, to the nearest N frames of VASP's own code above it.
-Shares are of busy samples. A frame that VASP reaches through a tail call is
-attributed to the caller of the routine that made it.
+Shares are of busy samples. The backend's own interposers (dgemv_, dfftw_* and
+so on, linked into the VASP image) are skipped. A frame that VASP reaches through
+a tail call is attributed to the caller of the routine that made it.
 """
 import argparse
 from collections import Counter
@@ -68,6 +69,8 @@ def profile(path):
             'top_symbols': {k: n / total for k, n in symbols.most_common(12)}}
 
 
+# The backend's interposers are linked into the VASP image; they are not VASP code.
+INTERPOSED = re.compile(r'(dgemv_|dgemm_|zgemm_|dfftw_\w+|vmb_\w+)\Z')
 TREE = re.compile(r'^([\s+!:|]*?)(\d+) (\S.*?)\s+\(in ([^)]+)\)')
 
 
@@ -88,7 +91,7 @@ def callers(path, pattern, frames=1):
         depth, count, symbol, image = len(found.group(1)), int(found.group(2)), found.group(3), found.group(4)
         while stack and stack[-1][0] >= depth:
             stack.pop()
-        own = image.startswith('vasp_std')
+        own = image.startswith('vasp_std') and INTERPOSED.match(symbol) is None
         hit = not own and match.search(f'{symbol} (in {image})') is not None
         inside = any(frame[3] for frame in stack)
         stack.append((depth, symbol, own, hit or inside))

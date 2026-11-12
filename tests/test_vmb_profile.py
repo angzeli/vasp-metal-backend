@@ -28,7 +28,8 @@ Sort by top of stack, same collapsed (when >= 5):
 
 
 # Call graph of 100 busy samples: dgemv_ under two VASP callers, FFTW under one,
-# and a VASP routine whose name contains the pattern (must not match).
+# a v0.5 interposer frame in the VASP image (skipped as a caller), and a VASP
+# routine whose name contains the pattern (must not match).
 TREE = """Analysis of sampling vasp_std_vmb (pid 1) every 1 millisecond
 Call graph:
     200 Thread_1   DispatchQueue_1: com.apple.main-thread  (serial)
@@ -39,7 +40,8 @@ Call graph:
     + !   : | 30 dgemv_  (in libopenblasp-r0.3.34.dylib) + 4  [0x5]
     + !   : |   25 .Lgemv_n_kernel_F320  (in libopenblasp-r0.3.34.dylib) + 5  [0x6]
     + !   : 10 proj1_  (in vasp_std_vmb) + 6  [0x7]
-    + !   : | 10 dgemv_  (in libopenblasp-r0.3.34.dylib) + 7  [0x8]
+    + !   : | 10 dgemv_  (in vasp_std_vmb) + 1  [0x7a]
+    + !   : |   10 dgemv_  (in libopenblasp-r0.3.34.dylib) + 7  [0x8]
     + !   : 20 fft3d_  (in vasp_std_vmb) + 8  [0x9]
     + !   :   20 n1_64  (in libfftw3.3.dylib) + 9  [0xa]
     + !   40 my_gemv_helper_  (in vasp_std_vmb) + 10  [0xb]
