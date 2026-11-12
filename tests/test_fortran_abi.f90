@@ -73,12 +73,14 @@ program test_fortran_abi
   call vmb_config_reload()
   call run('T', 'C', alpha, beta, .false., 0, 1)
 
+  call real_blas()
+
   write (*, '(a, es10.3)') 'fortran abi: worst err/tol = ', worst
   if (failures /= 0) then
     write (*, '(a, i0, a)') 'FAIL: ', failures, ' fortran ABI failures'
     stop 1
   end if
-  write (*, '(a)') 'PASS: fortran ABI (12 calls)'
+  write (*, '(a)') 'PASS: fortran ABI (12 calls, plus v0.5 dgemv/dgemm forwarding)'
 
 contains
 
@@ -167,6 +169,50 @@ contains
     if (s1(st_consumed) - s0(st_consumed) /= want_gpu) call flag('GPU consumption count')
     if (s1(st_completed) - s0(st_completed) /= want_gpu) call flag('GPU completion count')
     if (s1(st_cpu) - s0(st_cpu) /= want_cpu) call flag('CPU fallback count')
+  end subroutine
+
+  ! v0.5: dgemv and dgemm pass through the telemetry interposer to OpenBLAS.
+  ! Submatrix arguments, both transposes and beta = 0 over NaN; checked against
+  ! a quad-precision loop.
+  subroutine real_blas()
+    real(dp) :: ra(9, 8), rx(12), ry(12), rb(9, 8), rc(10, 7)
+    real(qp) :: acc, err
+    integer :: i, j, l
+    ra = reshape([(sin(0.37_dp * i), i = 1, 72)], [9, 8])
+    rb = reshape([(cos(0.21_dp * i), i = 1, 72)], [9, 8])
+    rx = [(0.1_dp * i - 0.5_dp, i = 1, 12)]
+    ry = ieee_value(1.0_dp, ieee_quiet_nan)
+    call dgemv('N', 5, 4, 1.5_dp, ra(2, 3), 9, rx(2), 2, 0.0_dp, ry(3), 1)
+    err = 0
+    do i = 1, 5
+      acc = 0
+      do j = 1, 4
+        acc = acc + 1.5_qp * ra(1 + i, 2 + j) * rx(2 + 2 * (j - 1))
+      end do
+      err = max(err, abs(acc - ry(2 + i)))
+    end do
+    ry = 1.0_dp
+    call dgemv('T', 5, 4, -1.0_dp, ra(2, 3), 9, rx(1), 1, 2.0_dp, ry(1), 3)
+    do j = 1, 4
+      acc = 2.0_qp
+      do i = 1, 5
+        acc = acc - ra(1 + i, 2 + j) * rx(i)
+      end do
+      err = max(err, abs(acc - ry(1 + 3 * (j - 1))))
+    end do
+    rc = ieee_value(1.0_dp, ieee_quiet_nan)
+    call dgemm('T', 'N', 6, 5, 4, 0.5_dp, ra(2, 2), 9, rb(3, 1), 9, 0.0_dp, rc(2, 2), 10)
+    do j = 1, 5
+      do i = 1, 6
+        acc = 0
+        do l = 1, 4
+          acc = acc + 0.5_qp * ra(1 + l, 1 + i) * rb(2 + l, j)
+        end do
+        err = max(err, abs(acc - rc(1 + i, 1 + j)))
+      end do
+    end do
+    write (*, '(a, es10.3)') 'dgemv/dgemm max |err| = ', real(err, dp)
+    if (.not. (err <= 1e-14_qp)) call flag('dgemv/dgemm result')
   end subroutine
 
   subroutine flag(what)

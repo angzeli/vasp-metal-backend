@@ -70,4 +70,26 @@ const char *vmb_status_name(int status);
    library constructor; 1 when per-rank telemetry is to be recorded. */
 int vmb_rank_telemetry(void);
 
+/* Exported SYMBOL from the first loaded image whose basename starts with
+   IMAGE_PREFIX, or NULL. SELF (our own definition) is never returned, so an
+   interposer cannot resolve to itself. The image path is copied to IMAGE. */
+void *vmb_find_symbol(const char *image_prefix, const char *symbol, const void *self,
+                      char *image, size_t image_size);
+
+/* v0.5 profiling of DGEMV, DGEMM and FFTW (rank-RRRRR.profile.json). Active only
+   on the per-rank telemetry route. 0 off, 1 profile, 2 profile plus the private
+   DGEMV reuse probe. */
+enum { VMB_PROFILE_OFF, VMB_PROFILE_ON, VMB_PROFILE_REUSE };
+int vmb_profile_level(void);
+const char *vmb_profile_level_name(int level);
+uint64_t vmb_ticks(void);        /* mach_absolute_time */
+double vmb_ticks_to_s(uint64_t ticks);
+/* JSON description of a return address: image basename, image-relative
+   offset and the nearest exported symbol. The address itself is not written. */
+void vmb_site_write_json(FILE *out, const void *addr);
+void vmb_json_string(FILE *out, const char *s);
+/* Profile sections; each writes one JSON object and returns its dropped count. */
+uint64_t vmb_blas_write_json(FILE *out);
+uint64_t vmb_fftw_write_json(FILE *out);
+
 #endif

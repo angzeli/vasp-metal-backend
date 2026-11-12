@@ -139,24 +139,33 @@ void vmb_config_reload(void)
              telemetry && !cfg.telemetry_rank ? telemetry : "");
 }
 
+void *vmb_find_symbol(const char *image_prefix, const char *symbol, const void *self,
+                      char *image, size_t image_size)
+{
+    size_t n = strlen(image_prefix);
+    for (uint32_t i = 0; i < _dyld_image_count(); i++) {
+        const char *name = _dyld_get_image_name(i);
+        const char *base = strrchr(name, '/');
+        if (strncmp(base ? base + 1 : name, image_prefix, n) != 0)
+            continue;
+        void *handle = dlopen(name, RTLD_LAZY | RTLD_NOLOAD);
+        void *fn = handle ? dlsym(handle, symbol) : NULL;
+        Dl_info info;
+        if (fn && fn != self && dladdr(fn, &info) && strcmp(info.dli_fname, name) == 0) {
+            if (image)
+                snprintf(image, image_size, "%s", name);
+            return fn;
+        }
+    }
+    return NULL;
+}
+
 /* zgemm_ exported by the loaded OpenBLAS image. RTLD_NEXT is not used: the
    Metal and Foundation frameworks load Accelerate, whose BLAS would win. */
 static zgemm_fn find_openblas_zgemm(void)
 {
-    for (uint32_t i = 0; i < _dyld_image_count(); i++) {
-        const char *name = _dyld_get_image_name(i);
-        const char *base = strrchr(name, '/');
-        if (strncmp(base ? base + 1 : name, "libopenblas", 11) != 0)
-            continue;
-        void *handle = dlopen(name, RTLD_LAZY | RTLD_NOLOAD);
-        void *fn = handle ? dlsym(handle, "zgemm_") : NULL;
-        Dl_info info;
-        if (fn && fn != (void *)zgemm_ && dladdr(fn, &info) && strcmp(info.dli_fname, name) == 0) {
-            snprintf(cpu_library, sizeof cpu_library, "%s", name);
-            return (zgemm_fn)fn;
-        }
-    }
-    return NULL;
+    return (zgemm_fn)vmb_find_symbol("libopenblas", "zgemm_", (const void *)zgemm_, cpu_library,
+                                     sizeof cpu_library);
 }
 
 static void init(void)
@@ -601,7 +610,7 @@ void vmb_report(FILE *out)
     };
     const char *dev = vmb_gpu_device_name();
     const char *err = vmb_gpu_init_error();
-    fprintf(out, "vmb.version=0.4\nvmb.mode=%s\nvmb.enabled=%d\nvmb.check=%d\nvmb.min_work=%.17g\n",
+    fprintf(out, "vmb.version=0.5\nvmb.mode=%s\nvmb.enabled=%d\nvmb.check=%d\nvmb.min_work=%.17g\n",
             mode_names[cfg.mode], cfg.mode != VMB_MODE_OFF, cfg.check, cfg.min_work);
     fprintf(out, "vmb.device=%s\n", dev ? dev : "none");
     if (err && *err)

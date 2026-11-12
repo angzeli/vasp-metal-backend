@@ -19,14 +19,17 @@ import sys
 SCHEMA = 'vmb.attempt-evidence.v1'
 REPORT_SCHEMA = 'vmb.rank-report.v1'
 CLAIM_SCHEMA = 'vmb.rank-claim.v1'
+PROFILE_SCHEMA = 'vmb.rank-profile.v1'
+PROFILE_LEVELS = ('profile', 'reuse')
 COUNTERS = ('calls', 'gpu_submitted', 'gpu_completed', 'consumed', 'cpu_calls', 'checked')
 STATUSES = ('ok', 'disabled', 'trivial', 'badarg', 'nonfinite', 'too_small', 'too_large',
             'no_device', 'gpu_error', 'gpu_nonfinite', 'check_failed', 'range', 'auto_cpu')
 MODES = ('off', 'auto', 'force')
 ATTEMPT = re.compile(r'[A-Za-z0-9][A-Za-z0-9._-]{0,63}\Z')
-NAME = re.compile(r'rank-([0-9]{5})\.(claim\.json|report\.json|telemetry\.tsv)\Z')
+NAME = re.compile(r'rank-([0-9]{5})\.(claim\.json|report\.json|telemetry\.tsv|profile\.json)\Z')
 MAX_REPORT_BYTES = 64 * 1024
-MAX_FILES = 3 * 4096 + 16
+MAX_PROFILE_BYTES = 64 * 1024 * 1024  # v0.5 profile files hold shape tables
+MAX_FILES = 4 * 4096 + 16
 # Fields every rank must share; mixing any of them means mixed attempts/binaries.
 SHARED = ('backend', 'mode', 'check', 'world_size', 'attempt_id', 'hostname', 'executable',
           'executable_stat')
@@ -50,10 +53,10 @@ def _reject_constant(token):
     raise EvidenceError(f'non-finite JSON constant {token}')
 
 
-def _read_json(path):
+def _read_json(path, limit=MAX_REPORT_BYTES):
     info = path.lstat()
     _require(stat.S_ISREG(info.st_mode), f'{path.name} is not a regular file')
-    _require(info.st_size <= MAX_REPORT_BYTES, f'{path.name} exceeds {MAX_REPORT_BYTES} bytes')
+    _require(info.st_size <= limit, f'{path.name} exceeds {limit} bytes')
     fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
     with os.fdopen(fd, 'rb') as handle:
         raw = handle.read(MAX_REPORT_BYTES + 1)
@@ -129,6 +132,32 @@ def check_rank_report(report, rank, attempt_id, world_size):
     return c, s
 
 
+def check_profile(report, profile, rank, attempt_id, world_size):
+    """Optional v0.5 profile file: declared in the report, bound to the same process.
+
+    Only its identity is checked here; the profile never changes a verdict."""
+    record = report.get('profile')
+    if record is None:
+        _require(profile is None, 'profile file without a report declaration')
+        return
+    _require(isinstance(record, dict) and set(record) == {'file', 'level'}
+             and record['level'] in PROFILE_LEVELS, 'malformed profile declaration')
+    if record['file'] is None:
+        _require(profile is None, 'profile file present but declared unpublished')
+        raise EvidenceError('declared profile was not published')
+    _require(record['file'] == f'rank-{rank:05d}.profile.json' and profile is not None,
+             'declared profile file is missing')
+    _require(isinstance(profile, dict) and profile.get('schema') == PROFILE_SCHEMA
+             and profile.get('complete') is True, 'not a complete vmb.rank-profile.v1')
+    _require(profile.get('attempt_id') == attempt_id and profile.get('rank') == rank
+             and profile.get('world_size') == world_size
+             and profile.get('pid') == report['process']['pid'],
+             'profile belongs to another attempt, rank or process')
+    _require(profile.get('level') == record['level'], 'profile level differs from the report')
+    _require(isinstance(profile.get('blas'), dict) and isinstance(profile.get('fftw'), dict),
+             'profile lacks its blas or fftw section')
+
+
 def _shared(report):
     process = report['process']
     return {'backend': json.dumps(report['backend'], sort_keys=True), 'mode': report['mode'],
@@ -147,6 +176,7 @@ def aggregate(directory, attempt_id, world_size, *, mode=None, check=None, execu
               'ranks_with_consumed': [], 'execution': None, 'shadow_check': None,
               'gpu_qualified': False, 'backend': None, 'mode': None, 'check': None,
               'executable': None, 'hostname': None, 'timing': None, 'work_decades': None,
+              'profile': None,
               'limitations': ['Counts calls made by the program through zgemm_ only.',
                               'Says nothing about speed, scientific convergence or agreement '
                               'with a reference.']}
@@ -166,7 +196,7 @@ def aggregate(directory, attempt_id, world_size, *, mode=None, check=None, execu
         problems.append(str(exc))
         return result
 
-    claims, reports, telemetry = {}, {}, set()
+    claims, reports, telemetry, profiles = {}, {}, set(), {}
     for name in names:
         match = NAME.fullmatch(name)
         if match is None:
@@ -183,11 +213,12 @@ def aggregate(directory, attempt_id, world_size, *, mode=None, check=None, execu
             telemetry.add(rank)
             continue
         try:
-            document = _read_json(path)
+            document = _read_json(path, MAX_PROFILE_BYTES if kind == 'profile.json'
+                                  else MAX_REPORT_BYTES)
         except (OSError, EvidenceError) as exc:
             problems.append(str(exc))
             continue
-        (claims if kind == 'claim.json' else reports)[rank] = document
+        {'claim.json': claims, 'report.json': reports, 'profile.json': profiles}[kind][rank] = document
 
     for rank, claim in sorted(claims.items()):
         if not (isinstance(claim, dict) and claim.get('schema') == CLAIM_SCHEMA
@@ -211,6 +242,7 @@ def aggregate(directory, attempt_id, world_size, *, mode=None, check=None, execu
                          and rank in telemetry, 'declared telemetry file is missing')
             else:
                 _require(rank not in telemetry, 'telemetry file without a report declaration')
+            check_profile(report, profiles.get(rank), rank, attempt_id, world_size)
         except EvidenceError as exc:
             problems.append(f'rank {rank}: {exc}')
             continue
@@ -247,6 +279,12 @@ def aggregate(directory, attempt_id, world_size, *, mode=None, check=None, execu
     worst = max(ratios) if ratios else None
     result['max_check_ratio'] = worst if worst is None or math.isfinite(worst) else 'nonfinite'
     result['ranks_with_consumed'] = consumed_ranks
+    declared = {r: reports[r]['profile']['level'] for r in counters if reports[r].get('profile')}
+    if declared:
+        if len(set(declared.values())) > 1 or len(declared) != len(counters):
+            problems.append('ranks disagree on the profile level')
+        result['profile'] = {'level': sorted(set(declared.values()))[0],
+                             'ranks': sorted(r for r in declared if r in profiles)}
     timed = [reports[r] for r in counters if reports[r].get('timing') is not None]
     if timed:
         result['timing'] = {'try_s': sum(r['timing']['try_s'] for r in timed),
