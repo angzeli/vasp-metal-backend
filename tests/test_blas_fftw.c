@@ -4,6 +4,7 @@
  * the per-rank route), and with the FFTW plan cache off or on
  * (VMB_FFTW_PLAN_CACHE). Prints the calls it made, for the profile and cache
  * checks in tests/test_profile_route.py. */
+#include <dlfcn.h>
 #include <fftw3.h>
 #include <math.h>
 #include <stdio.h>
@@ -128,9 +129,14 @@ static void gemm_case(dgemm_fn ref, char ta, char tb, int m, int n, int k, doubl
 
 int main(void)
 {
-    dgemv_fn ref_gemv = (dgemv_fn)vmb_find_symbol("libopenblas", "dgemv_", (void *)dgemv_, NULL, 0);
-    dgemm_fn ref_gemm = (dgemm_fn)vmb_find_symbol("libopenblas", "dgemm_", (void *)dgemm_, NULL, 0);
-    check(ref_gemv && ref_gemm, "OpenBLAS symbols resolved");
+    /* The reference is the library the interposers were told to forward to. */
+    const char *dblas = getenv("VMB_DBLAS_LIBRARY");
+    const char *image = dblas && strcmp(dblas, "accelerate") == 0 ? "libBLAS" : "libopenblas";
+    if (image[3] == 'B')
+        dlopen("/System/Library/Frameworks/Accelerate.framework/Accelerate", RTLD_NOW | RTLD_LOCAL);
+    dgemv_fn ref_gemv = (dgemv_fn)vmb_find_symbol(image, "dgemv_", (void *)dgemv_, NULL, 0);
+    dgemm_fn ref_gemm = (dgemm_fn)vmb_find_symbol(image, "dgemm_", (void *)dgemm_, NULL, 0);
+    check(ref_gemv && ref_gemm, "reference dgemv_/dgemm_ resolved");
     if (!ref_gemv || !ref_gemm)
         return 1;
 

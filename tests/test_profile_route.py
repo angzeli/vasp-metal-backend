@@ -190,6 +190,46 @@ class ProfileRouteTest(unittest.TestCase):
         code = subprocess.run([str(PROBE)], env=env, capture_output=True).returncode
         self.assertEqual(code, CONFIG_ERROR)
 
+    def test_dblas_accelerate(self):
+        # Bit-for-bit agreement with Accelerate's own dgemv_/dgemm_ is checked in
+        # the probe; here, that the library is used and declared.
+        self.run_ranks(VMB_DBLAS_LIBRARY='accelerate', VMB_PROFILE='1')
+        result = self.aggregate()
+        self.assertEqual(result['evidence'], 'COMPLETE', result['problems'])
+        self.assertEqual(result['dblas_library'], 'accelerate')
+        self.assertEqual(self.report()['dblas_library'],
+                         {'library': 'accelerate', 'image': 'libBLAS.dylib'})
+        self.assertEqual(self.profile()['blas']['cpu_library'], 'libBLAS.dylib')
+
+    def test_dblas_default_is_openblas(self):
+        self.run_ranks(VMB_PROFILE=None)
+        result = self.aggregate()
+        self.assertEqual(result['dblas_library'], 'openblas')
+        self.assertEqual(self.report()['dblas_library']['library'], 'openblas')
+        self.assertTrue(self.report()['dblas_library']['image'].startswith('libopenblas'))
+
+    def test_dblas_declaration_is_checked(self):
+        self.run_ranks(VMB_DBLAS_LIBRARY='accelerate')
+        path = self.dir / 'rank-00001.report.json'
+        original = json.loads(path.read_text())
+        for change, message in (
+                (lambda d: d['dblas_library'].update(library='mkl'), 'malformed dblas_library'),
+                (lambda d: d['dblas_library'].update(image='libopenblas.0.dylib'),
+                 'image does not match'),
+                (lambda d: d.update(dblas_library={'library': 'openblas', 'image': None}),
+                 'ranks disagree on the DGEMV/DGEMM library')):
+            doc = json.loads(json.dumps(original))
+            change(doc)
+            path.write_text(json.dumps(doc))
+            result = self.aggregate()
+            self.assertEqual(result['evidence'], 'INVALID')
+            self.assertIn(message, ' '.join(result['problems']))
+
+    def test_dblas_setting_is_checked(self):
+        env = env_for(self.dir, 0, 1, VMB_DBLAS_LIBRARY='mkl')
+        code = subprocess.run([str(PROBE)], env=env, capture_output=True).returncode
+        self.assertEqual(code, CONFIG_ERROR)
+
     def test_profile_requires_rank_telemetry(self):
         env = env_for(self.dir, 0, 1, VMB_PROFILE='1', VMB_TELEMETRY=None)
         code = subprocess.run([str(PROBE)], env=env, capture_output=True).returncode

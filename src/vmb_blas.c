@@ -1,6 +1,7 @@
 /* v0.5 DGEMV and DGEMM telemetry interposers.
  *
- * Both routines are always forwarded, unchanged, to the OpenBLAS image: this
+ * Both routines are always forwarded, unchanged, to the OpenBLAS image (or to
+ * Accelerate when VMB_DBLAS_LIBRARY selects it, see dblas_init): this
  * layer never computes a result. With profiling active (vmb_profile_level) it
  * aggregates calls and time per (shape, return address). At level REUSE it
  * also checks, per DGEMV call site, whether consecutive calls use the same
@@ -11,6 +12,7 @@
 #include "vmb.h"
 #include "vmb_internal.h"
 
+#include <dlfcn.h>
 #include <os/lock.h>
 #include <pthread.h>
 #include <stdint.h>
@@ -38,16 +40,55 @@ static dgemm_fn cpu_dgemm;
 static char blas_library[1024];
 static pthread_once_t resolve_once = PTHREAD_ONCE_INIT;
 
+/* v0.5 opt-in: DGEMV and DGEMM (only these two) forwarded to Accelerate instead
+   of OpenBLAS, selected by VMB_DBLAS_LIBRARY=openblas|accelerate or, for runners
+   that strip VMB_* settings, a build with DBLAS_ACCELERATE_DEFAULT=1. Results
+   are Accelerate's own, so they may differ from OpenBLAS in the last bits. */
+#ifndef VMB_DBLAS_ACCELERATE_DEFAULT
+#define VMB_DBLAS_ACCELERATE_DEFAULT 0
+#endif
+#define CONFIG_ERROR 78
+#define ACCELERATE "/System/Library/Frameworks/Accelerate.framework/Accelerate"
+static int use_accelerate;
+
+__attribute__((constructor)) static void dblas_init(void)
+{
+    const char *v = getenv("VMB_DBLAS_LIBRARY");
+    if (!v)
+        use_accelerate = VMB_DBLAS_ACCELERATE_DEFAULT;
+    else if (strcmp(v, "openblas") == 0 || strcmp(v, "accelerate") == 0)
+        use_accelerate = v[0] == 'a';
+    else {
+        fprintf(stderr, "vmb: VMB_DBLAS_LIBRARY must be openblas or accelerate\n");
+        exit(CONFIG_ERROR);
+    }
+}
+
 static void resolve(void)
 {
-    cpu_dgemv = (dgemv_fn)vmb_find_symbol("libopenblas", "dgemv_", (const void *)dgemv_,
-                                          blas_library, sizeof blas_library);
-    cpu_dgemm = (dgemm_fn)vmb_find_symbol("libopenblas", "dgemm_", (const void *)dgemm_, NULL, 0);
-    if (!cpu_dgemv || !cpu_dgemm) {
-        fprintf(stderr, "vmb: OpenBLAS dgemv_/dgemm_ not found among loaded images; "
-                        "link libvmb.a ahead of -lopenblas\n");
+    /* Accelerate's BLAS image is libBLAS.dylib inside vecLib; Metal normally has
+       it loaded already, otherwise it is loaded here, local to this lookup. */
+    const char *image = use_accelerate ? "libBLAS" : "libopenblas";
+    if (use_accelerate && !dlopen(ACCELERATE, RTLD_NOW | RTLD_LOCAL)) {
+        fprintf(stderr, "vmb: cannot load Accelerate for VMB_DBLAS_LIBRARY=accelerate\n");
         abort();
     }
+    cpu_dgemv = (dgemv_fn)vmb_find_symbol(image, "dgemv_", (const void *)dgemv_, blas_library,
+                                          sizeof blas_library);
+    cpu_dgemm = (dgemm_fn)vmb_find_symbol(image, "dgemm_", (const void *)dgemm_, NULL, 0);
+    if (!cpu_dgemv || !cpu_dgemm) {
+        fprintf(stderr, "vmb: %s dgemv_/dgemm_ not found among loaded images; "
+                        "link libvmb.a ahead of -lopenblas\n", image);
+        abort();
+    }
+}
+
+void vmb_dblas_write_json(FILE *out)
+{
+    const char *lib = strrchr(blas_library, '/');
+    fprintf(out, "{\"library\": \"%s\", \"image\": ", use_accelerate ? "accelerate" : "openblas");
+    vmb_json_string(out, blas_library[0] ? (lib ? lib + 1 : blas_library) : NULL);
+    fprintf(out, "}");
 }
 
 /* ---- shape table ---------------------------------------------------------- */

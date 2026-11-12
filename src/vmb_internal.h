@@ -95,5 +95,8 @@ uint64_t vmb_fftw_write_json(FILE *out);
 /* v0.5 opt-in FFTW plan cache (VMB_FFTW_PLAN_CACHE, build default
    PLAN_CACHE_DEFAULT): its report section, written whether it is on or off. */
 void vmb_fftw_cache_write_json(FILE *out);
+/* v0.5 opt-in DGEMV/DGEMM library (VMB_DBLAS_LIBRARY, build default
+   DBLAS_ACCELERATE_DEFAULT): its report section, written whichever is used. */
+void vmb_dblas_write_json(FILE *out);
 
 #endif

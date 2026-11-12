@@ -177,6 +177,23 @@ def check_plan_cache(report):
     return record['enabled']
 
 
+DBLAS_IMAGES = {'openblas': 'libopenblas', 'accelerate': 'libBLAS'}
+
+
+def check_dblas(report):
+    """Optional v0.5 DGEMV/DGEMM library declaration; absent means OpenBLAS."""
+    record = report.get('dblas_library')
+    if record is None:
+        return 'openblas'
+    _require(isinstance(record, dict) and set(record) == {'library', 'image'}
+             and record['library'] in DBLAS_IMAGES
+             and (record['image'] is None or isinstance(record['image'], str)),
+             'malformed dblas_library declaration')
+    _require(record['image'] is None or record['image'].startswith(DBLAS_IMAGES[record['library']]),
+             'dblas_library image does not match the declared library')
+    return record['library']
+
+
 def _shared(report):
     process = report['process']
     return {'backend': json.dumps(report['backend'], sort_keys=True), 'mode': report['mode'],
@@ -195,7 +212,7 @@ def aggregate(directory, attempt_id, world_size, *, mode=None, check=None, execu
               'ranks_with_consumed': [], 'execution': None, 'shadow_check': None,
               'gpu_qualified': False, 'backend': None, 'mode': None, 'check': None,
               'executable': None, 'hostname': None, 'timing': None, 'work_decades': None,
-              'profile': None, 'fftw_plan_cache': None,
+              'profile': None, 'fftw_plan_cache': None, 'dblas_library': None,
               'limitations': ['Counts calls made by the program through zgemm_ only.',
                               'Says nothing about speed, scientific convergence or agreement '
                               'with a reference.']}
@@ -245,7 +262,8 @@ def aggregate(directory, attempt_id, world_size, *, mode=None, check=None, execu
                 and claim.get('world_size') == world_size and type(claim.get('pid')) is int):
             problems.append(f'rank {rank}: malformed or foreign claim')
 
-    counters, statuses, ratios, consumed_ranks, shared, cache_enabled = {}, {}, [], [], {}, {}
+    counters, statuses, ratios, consumed_ranks, shared, cache_enabled, dblas = \
+        {}, {}, [], [], {}, {}, {}
     for rank, report in sorted(reports.items()):
         try:
             c, s = check_rank_report(report, rank, attempt_id, world_size)
@@ -263,6 +281,7 @@ def aggregate(directory, attempt_id, world_size, *, mode=None, check=None, execu
                 _require(rank not in telemetry, 'telemetry file without a report declaration')
             check_profile(report, profiles.get(rank), rank, attempt_id, world_size)
             cache_enabled[rank] = check_plan_cache(report)
+            dblas[rank] = check_dblas(report)
         except EvidenceError as exc:
             problems.append(f'rank {rank}: {exc}')
             continue
@@ -313,6 +332,11 @@ def aggregate(directory, attempt_id, world_size, *, mode=None, check=None, execu
             'enabled': True, 'ranks': cached,
             **{k: sum(reports[r]['fftw_plan_cache'][k] for r in cached)
                for k in ('hits', 'misses', 'bypassed')}}
+    libraries = {dblas[r] for r in counters if r in dblas}
+    if len(libraries) > 1:
+        problems.append('ranks disagree on the DGEMV/DGEMM library')
+    elif libraries:
+        result['dblas_library'] = libraries.pop()
     timed = [reports[r] for r in counters if reports[r].get('timing') is not None]
     if timed:
         result['timing'] = {'try_s': sum(r['timing']['try_s'] for r in timed),

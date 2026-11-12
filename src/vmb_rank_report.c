@@ -338,6 +338,10 @@ static void write_report(FILE *out, void *arg)
     fprintf(out, " \"fftw_plan_cache\": ");
     vmb_fftw_cache_write_json(out);
     fprintf(out, ",\n");
+    /* DGEMV/DGEMM library declaration (v0.5): additive; every v0.5 report has it. */
+    fprintf(out, " \"dblas_library\": ");
+    vmb_dblas_write_json(out);
+    fprintf(out, ",\n");
     if (ra->telemetry_file)
         fprintf(out, " \"telemetry\": {\"file\": \"%s\", \"dropped_shapes\": %llu}}\n",
                 ra->telemetry_file, (unsigned long long)ra->dropped);

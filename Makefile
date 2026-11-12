@@ -35,6 +35,8 @@ SOURCE_DIRTY  ?= $(shell test -z "$$(git status --porcelain -- src include Makef
 PROFILE_DEFAULT ?= 0
 # Build-time default of VMB_FFTW_PLAN_CACHE (0 off, 1 on), for the same reason.
 PLAN_CACHE_DEFAULT ?= 0
+# Build-time default of VMB_DBLAS_LIBRARY (0 openblas, 1 accelerate), likewise.
+DBLAS_ACCELERATE_DEFAULT ?= 0
 IDENTITY  = -DVMB_PROFILE_DEFAULT=$(PROFILE_DEFAULT) -DVMB_SOURCE_COMMIT='"$(SOURCE_COMMIT)"' -DVMB_SOURCE_DIGEST='"$(SOURCE_DIGEST)"' \
             -DVMB_SOURCE_DIRTY=$(SOURCE_DIRTY)
 
@@ -65,8 +67,8 @@ $(BUILD)/vmb_metal.o: src/vmb_metal.m src/vmb_internal.h $(BUILD)/zgemm_df64_met
 $(BUILD)/vmb_telemetry.o: src/vmb_telemetry.c include/vmb.h src/vmb_internal.h | $(BUILD)
 	$(CC) $(CFLAGS) -c $< -o $@
 
-$(BUILD)/vmb_blas.o: src/vmb_blas.c include/vmb.h src/vmb_internal.h | $(BUILD)
-	$(CC) $(CFLAGS) -c $< -o $@
+$(BUILD)/vmb_blas.o: src/vmb_blas.c include/vmb.h src/vmb_internal.h $(BUILD)/source-identity | $(BUILD)
+	$(CC) $(CFLAGS) -DVMB_DBLAS_ACCELERATE_DEFAULT=$(DBLAS_ACCELERATE_DEFAULT) -c $< -o $@
 
 $(BUILD)/vmb_fftw.o: src/vmb_fftw.c include/vmb.h src/vmb_internal.h $(BUILD)/source-identity | $(BUILD)
 	$(CC) $(CFLAGS) -DVMB_PLAN_CACHE_DEFAULT=$(PLAN_CACHE_DEFAULT) -c $< -o $@
@@ -77,9 +79,9 @@ $(BUILD)/vmb_rank_report.o: src/vmb_rank_report.c include/vmb.h src/vmb_internal
 # Rebuilt only when the embedded identity changes. The objects are also removed,
 # because make 3.81 compares whole-second times and could keep a stale one.
 $(BUILD)/source-identity: FORCE | $(BUILD)
-	@echo '$(SOURCE_COMMIT) $(SOURCE_DIGEST) $(SOURCE_DIRTY) $(PROFILE_DEFAULT) $(PLAN_CACHE_DEFAULT)' | cmp -s - $@ || \
-	    { echo '$(SOURCE_COMMIT) $(SOURCE_DIGEST) $(SOURCE_DIRTY) $(PROFILE_DEFAULT) $(PLAN_CACHE_DEFAULT)' > $@; \
-	      rm -f $(BUILD)/vmb_rank_report.o $(BUILD)/vmb_fftw.o; }
+	@echo '$(SOURCE_COMMIT) $(SOURCE_DIGEST) $(SOURCE_DIRTY) $(PROFILE_DEFAULT) $(PLAN_CACHE_DEFAULT) $(DBLAS_ACCELERATE_DEFAULT)' | cmp -s - $@ || \
+	    { echo '$(SOURCE_COMMIT) $(SOURCE_DIGEST) $(SOURCE_DIRTY) $(PROFILE_DEFAULT) $(PLAN_CACHE_DEFAULT) $(DBLAS_ACCELERATE_DEFAULT)' > $@; \
+	      rm -f $(BUILD)/vmb_rank_report.o $(BUILD)/vmb_fftw.o $(BUILD)/vmb_blas.o; }
 
 $(BUILD)/libvmb.a: $(BUILD)/vmb_dispatch.o $(BUILD)/vmb_metal.o $(BUILD)/vmb_telemetry.o \
                    $(BUILD)/vmb_rank_report.o $(BUILD)/vmb_blas.o $(BUILD)/vmb_fftw.o
