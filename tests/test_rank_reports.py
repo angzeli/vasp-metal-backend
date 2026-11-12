@@ -162,7 +162,7 @@ class RankReportTest(unittest.TestCase):
         report = self.dir.parent / 'legacy.txt'
         code, err = self.single(base_env(VMB_MODE='off', VMB_REPORT=report), calls='all')
         self.assertEqual(code, 0, err)
-        self.assertIn('vmb.version=0.3', report.read_text())  # single-process route unchanged
+        self.assertIn('vmb.version=0.4', report.read_text())  # single-process route unchanged
         code, err = self.single(base_env(VMB_REPORT=report, OMPI_COMM_WORLD_RANK='0',
                                          OMPI_COMM_WORLD_SIZE='2'))
         self.assertEqual(code, CONFIG_ERROR, err)
@@ -239,6 +239,32 @@ class RankReportTest(unittest.TestCase):
         self.assertEqual(self.agg(world=4, attempt='A2')['evidence'], 'INVALID')
         self.assertEqual(self.agg(world=5)['evidence'], 'INVALID')
         self.assertEqual(self.agg(world=4, mode='off')['evidence'], 'INVALID')
+
+    def test_timing_fields_are_summed_and_optional(self):
+        self.launch(4, calls='0,1')
+        reports = [json.loads((self.dir / f'rank-{r:05d}.report.json').read_text()) for r in range(4)]
+        self.assertTrue(all(sum(r['work_decades']) == r['counters']['calls'] for r in reports))
+        res = self.agg(world=4)
+        self.assertEqual(res['evidence'], 'COMPLETE', res['problems'])
+        self.assertEqual(res['timing']['ranks_with_timing'], 4)
+        self.assertEqual(sum(res['work_decades']), 2)
+        self.assertAlmostEqual(res['timing']['cpu_s'], sum(r['timing']['cpu_s'] for r in reports))
+        self.assertNotIn('timing', evidence.summary(res))  # compact summary unchanged
+
+    def test_v03_report_without_timing_still_verifies(self):
+        res = self.tampered(lambda d: (d.pop('timing'), d.pop('work_decades')))
+        self.assertEqual(res['evidence'], 'COMPLETE', res['problems'])
+
+    def test_malformed_timing_rejected(self):
+        for edit in (lambda d: d['timing'].__setitem__('cpu_s', -1.0),
+                     lambda d: d['timing'].__setitem__('try_s', 'fast'),
+                     lambda d: d.__setitem__('work_decades', [0] * 15),
+                     lambda d: d['work_decades'].__setitem__(0, d['work_decades'][0] + 1),
+                     lambda d: d.pop('work_decades')):
+            with self.subTest(edit=edit):
+                self.tearDown()
+                self.setUp()
+                self.assertEqual(self.tampered(edit)['evidence'], 'INVALID')
 
     def test_mixed_attempts_in_one_directory(self):
         self.launch(4, ranks=[0, 1])

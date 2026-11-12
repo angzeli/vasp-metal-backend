@@ -259,6 +259,12 @@ static void write_report(FILE *out, void *arg)
                 s.max_check_ratio);
     else
         fprintf(out, " \"max_check_ratio\": null, \"max_check_ratio_state\": \"nonfinite\",\n");
+    /* Optional timing fields (v0.4): additive, absent from v0.3 reports. */
+    fprintf(out, " \"timing\": {\"try_s\": %.9f, \"cpu_s\": %.9f},\n \"work_decades\": [",
+            s.try_s, s.cpu_s);
+    for (int i = 0; i < 16; i++)
+        fprintf(out, "%s%llu", i ? ", " : "", (unsigned long long)s.work_decades[i]);
+    fprintf(out, "],\n");
     if (ra->telemetry_file)
         fprintf(out, " \"telemetry\": {\"file\": \"%s\", \"dropped_shapes\": %llu}}\n",
                 ra->telemetry_file, (unsigned long long)ra->dropped);

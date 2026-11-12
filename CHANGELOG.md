@@ -1,6 +1,51 @@
 # Changelog
 
-## 0.3.0 (unreleased)
+## 0.4.0 (unreleased)
+
+A measurement release: whether realistic VASP workloads produce ZGEMM calls the
+GPU can win. Numerical policy, modes and the evidence contract are unchanged;
+`auto` still has no regions. Results: [docs/RESULTS-v0.4.md](docs/RESULTS-v0.4.md).
+
+### Added
+
+- **Per-rank timing.** Rank reports gain optional `timing` (seconds in GPU
+  attempts and in OpenBLAS) and `work_decades` (calls per m·n·k decade). The
+  aggregator validates and sums them, and still accepts v0.3 reports. The compact
+  summary is unchanged.
+- **`scripts/vmb_shapes.py`.** A shape census of a managed run from per-rank
+  telemetry. It reconciles the calls with the attempt evidence, bins work by decade,
+  bounds the share of rank time any region rule could save, and exports observed
+  shapes for replay.
+- **`scripts/vmb_profile.py`.** Attributes the busy time of a rank sampled by macOS
+  `sample` to BLAS kernels, FFTW, MPI and VASP's own code.
+- **`run_bench.py --concurrency N`.** N `shape_replay` replicas, each with one CPU
+  thread, start together behind a barrier (`shape_replay --start-at`), modelling N
+  ranks sharing one GPU.
+- **Ionic relaxations in `compare_runs.py`.** Electronic convergence per ionic step,
+  the required-accuracy stop, step counts, and final energy, forces, stress and
+  lattice, against thresholds fixed before any run.
+
+### Findings
+
+Anatase TiO2 on an idle MacBook Pro M3 Max, in two parallel series. Gate A failed in
+both, so `auto` stays empty.
+- **PBE** (a variable-cell relaxation at 4–8 ranks, and a single point on the relaxed
+  cell):
+  - **Census:** ZGEMM is 7.0–8.3% of rank time, and no call reaches the GPU-win
+    region.
+  - **Correctness:** with every ZGEMM forced onto the GPU and the shadow check on, the
+    relaxation (4.9 million calls) and the single point (1.0 million) both match their
+    CPU runs, with 0 failures (VASP-verified).
+  - **Timing:** forcing ZGEMM onto the GPU without the check is 2.60× slower end to
+    end on the relaxation (557 ± 7 s against 214 ± 2 s) and 2.54× on the single point.
+    That comes from about 0.56 ms of per-call GPU latency.
+  - **Profile:** FFTW is the largest library-reachable work (38–41% of busy time).
+- **HSE06** (a hybrid single point on the same cell, CPU only, converged in 13.5 h):
+  - **Census:** ZGEMM falls to 0.008% of rank time, with 0 calls in the GPU-win
+    region, so no GPU run was made.
+  - **Profile:** FFTW (38–41%) and the exchange DGEMV (29–32%) dominate.
+
+## 0.3.0 (merged, untagged)
 
 Managed MPI execution and per-rank evidence. The architecture (a link-time
 `zgemm_` interposer) and the numerical policy are unchanged from 0.2, including

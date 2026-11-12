@@ -118,6 +118,14 @@ def check_rank_report(report, rank, attempt_id, world_size):
                  'malformed finite check ratio')
     else:
         _require(state == 'nonfinite' and ratio is None, 'malformed check ratio state')
+    timing, decades = report.get('timing'), report.get('work_decades')
+    if timing is not None or decades is not None:  # optional since v0.4
+        _require(isinstance(timing, dict) and set(timing) == {'try_s', 'cpu_s'}
+                 and all(type(timing[k]) in (int, float) and math.isfinite(timing[k]) and timing[k] >= 0
+                         for k in timing), 'malformed timing')
+        _require(isinstance(decades, list) and len(decades) == 16
+                 and all(type(v) is int and v >= 0 for v in decades) and sum(decades) == c['calls'],
+                 'malformed work_decades or total differs from calls')
     return c, s
 
 
@@ -138,7 +146,7 @@ def aggregate(directory, attempt_id, world_size, *, mode=None, check=None, execu
               'totals': None, 'statuses': None, 'max_check_ratio': None,
               'ranks_with_consumed': [], 'execution': None, 'shadow_check': None,
               'gpu_qualified': False, 'backend': None, 'mode': None, 'check': None,
-              'executable': None, 'hostname': None,
+              'executable': None, 'hostname': None, 'timing': None, 'work_decades': None,
               'limitations': ['Counts calls made by the program through zgemm_ only.',
                               'Says nothing about speed, scientific convergence or agreement '
                               'with a reference.']}
@@ -239,6 +247,12 @@ def aggregate(directory, attempt_id, world_size, *, mode=None, check=None, execu
     worst = max(ratios) if ratios else None
     result['max_check_ratio'] = worst if worst is None or math.isfinite(worst) else 'nonfinite'
     result['ranks_with_consumed'] = consumed_ranks
+    timed = [reports[r] for r in counters if reports[r].get('timing') is not None]
+    if timed:
+        result['timing'] = {'try_s': sum(r['timing']['try_s'] for r in timed),
+                            'cpu_s': sum(r['timing']['cpu_s'] for r in timed),
+                            'ranks_with_timing': len(timed)}
+        result['work_decades'] = [sum(r['work_decades'][i] for r in timed) for i in range(16)]
     if problems:
         result['evidence'] = 'INVALID'
     elif result['missing_ranks']:

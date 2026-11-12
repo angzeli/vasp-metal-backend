@@ -13,12 +13,12 @@ licensed VASP objects are relinked privately and never leave the local machine.
 
 ## Status
 
-| | v0.1 (`d3be811`) | v0.2 (final safety fix `afb272e`) | v0.3 (unreleased) |
-| --- | --- | --- | --- |
-| Standalone correctness | verified | **passed** at `afb272e`: 138 C cases, 12 Fortran ABI calls, 15 run-comparison cases | numerical gates unchanged and passing; per-rank report and aggregation tests added |
-| Private relink | verified | verified (link only, `0344fdb` build) | link-only relink on the Mac mini with the port's toolchain convention |
-| VASP integration | **verified** on Si2: 802/802 GPU results consumed, same TOTEN | **verified on the earlier `0344fdb` build** (Si2: 802/802 consumed, 0 shadow failures, 0 range fallbacks, same TOTEN); **`afb272e` not VASP-tested** | 16-rank managed qualification: see [docs/RESULTS-v0.3.md](docs/RESULTS-v0.3.md) |
-| VASP performance acceleration | not established | **not established**; synthetic benchmarks exploratory only (busy host) | **not established** |
+| | v0.1 (`d3be811`) | v0.2 (final safety fix `afb272e`) | v0.3 (merged, untagged) | v0.4 (unreleased) |
+| --- | --- | --- | --- | --- |
+| Standalone correctness | verified | **passed** at `afb272e`: 138 C cases, 12 Fortran ABI calls, 15 run-comparison cases | numerical gates unchanged and passing; per-rank report and aggregation tests added | numerical gates unchanged and passing; census, profile and relaxation-comparison tests added |
+| Private relink | verified | verified (link only, `0344fdb` build) | link-only relink on the Mac mini with the port's toolchain convention | link-only relink on the MacBook (M3 Max) |
+| VASP integration | **verified** on Si2: 802/802 GPU results consumed, same TOTEN | **verified on the earlier `0344fdb` build** (Si2: 802/802 consumed, 0 shadow failures, 0 range fallbacks, same TOTEN); **`afb272e` not VASP-tested** | 16-rank managed qualification: see [docs/RESULTS-v0.3.md](docs/RESULTS-v0.3.md) | TiO2 at 8 ranks, two series: PBE relaxation and single point with forced GPU results VASP-verified (4.9M and 1.0M calls, 0 shadow failures); HSE06 single point measured on the CPU only: see [docs/RESULTS-v0.4.md](docs/RESULTS-v0.4.md) |
+| VASP performance acceleration | not established | **not established**; synthetic benchmarks exploratory only (busy host) | **not established** | **not established**: no TiO2 ZGEMM call reaches the GPU-win region; forcing ZGEMM onto the GPU is 2.6× slower end to end with PBE, and ZGEMM is 0.008% of rank time with HSE06 |
 
 **Companion repositories.** Relinking and managed runs use the VASP port
 [angzeli/vasp-6.6.1-macos-arm64-port](https://github.com/angzeli/vasp-6.6.1-macos-arm64-port)
@@ -28,14 +28,21 @@ and evidence binding use CMW,
 Both expect separately licensed VASP and potentials supplied locally.
 
 "VASP-verified" in these documents means only that `scripts/compare_runs.py`
-accepted a backend-off and backend-on pair of the Si2 fixture (correctness and
-dispatch). It is not general validation.
+accepted a backend-off and backend-on pair of the same case: the Si2 fixture, or in
+v0.4 the TiO2 PBE relaxation and single point (correctness and dispatch). It is not
+general validation.
 
 v0.3 adds managed 16-rank execution evidence. Each MPI rank writes its own
 versioned report, `scripts/vmb_evidence.py` aggregates them strictly, and the
 VASP port's runner selects the relinked binary only through a reviewed, pinned
 manifest. The contract is in [docs/CONTRACT-v0.3.md](docs/CONTRACT-v0.3.md),
 and the changes are listed in [CHANGELOG.md](CHANGELOG.md).
+
+v0.4 measures a realistic system, anatase TiO2 on an M3 Max, in two parallel series:
+**PBE** (a variable-cell relaxation and a single point on the relaxed cell) and
+**HSE06** (a hybrid single point on the same cell). It adds a shape census, a profile
+attribution tool and a GPU-sharing benchmark. Results are in
+[docs/RESULTS-v0.4.md](docs/RESULTS-v0.4.md).
 
 - **Correctness is not speedup.** The verified Si2 integrations show that GPU
   results can feed a converging SCF without changing the energy. At those sizes
@@ -63,8 +70,15 @@ and the changes are listed in [CHANGELOG.md](CHANGELOG.md).
 - **Real shapes are small.** Telemetry from the v0.2 Si2 run shows that every
   ZGEMM has m·n·k ≤ 1.5e5, at least 100× below the region where the GPU won.
   `auto` therefore keeps all of them on the CPU.
+- **TiO2 confirms it (v0.4).** In both series no ZGEMM call reaches the GPU-win
+  region (m·n ≥ 16384 and m·n·k ≥ 1.5e7).
+  - With PBE, ZGEMM is 7.0–8.3% of rank time. Forcing it onto the GPU is 2.6× slower
+    end to end, from about 0.56 ms per call with 8 ranks sharing the GPU.
+  - With HSE06, ZGEMM is 0.008% of rank time.
+  - FFTW is 38–41% of busy time in both series, and the HSE06 exchange DGEMV 29–32%.
 - Details: [docs/RESULTS-v0.1.md](docs/RESULTS-v0.1.md),
-  [docs/RESULTS-v0.2.md](docs/RESULTS-v0.2.md). Default mode is off.
+  [docs/RESULTS-v0.2.md](docs/RESULTS-v0.2.md),
+  [docs/RESULTS-v0.4.md](docs/RESULTS-v0.4.md). Default mode is off.
 
 ## How it works
 
@@ -96,7 +110,7 @@ GCC 16.1 gfortran and OpenBLAS 0.3.34 at the paths in the `Makefile`.
 
 ```sh
 make -j1 all                    # or: make -j1 PORT_ROOT=/path/to/vasp-port all
-make -j1 test                   # numerical, Fortran ABI and per-rank report tests
+make -j1 test                   # numerical, Fortran ABI, per-rank report, census and profile tests
 python3 -B tests/test_compare_runs.py
 ```
 
@@ -113,6 +127,8 @@ the run reports per-phase medians and quartiles.
 - Caps: memory gate, one thread, a wall-time limit, and repetition and
   working-set limits.
 - Timing on a busy host is labeled exploratory.
+- `--concurrency N` (1–8) starts N replicas, each with one CPU thread, behind a
+  start barrier, to model N ranks sharing one GPU.
 
 ## Use with a private VASP build
 
@@ -131,7 +147,12 @@ timeout, memory-pressure gate, ledger capped at two launches, own process
 group, no retries.
 - `--allow-warn-pressure` is an explicit override for WARN-level pressure only.
 - `scripts/compare_runs.py OFF_DIR ON_DIR` classifies a pair as VASP-verified,
-  CPU-only consistent or FAILED.
+  CPU-only consistent or FAILED. It also compares ionic relaxations.
+- `scripts/vmb_shapes.py census RUN_DIR --output OUT.json` merges a managed run's
+  per-rank telemetry into one shape census. It reconciles the calls with the attempt
+  evidence and bounds the share of rank time a region rule could save.
+- `scripts/vmb_profile.py SAMPLE...` attributes the busy time in macOS `sample`
+  reports of a rank to BLAS kernels, FFTW, MPI and VASP's own code.
 
 | Variable | Default | Meaning |
 | --- | --- | --- |
@@ -152,8 +173,11 @@ group, no retries.
 
 - `build/test_zgemm`: 138 cases.
 - `build/test_fortran_abi`: 12 calls, against a quad-precision oracle.
-- `tests/test_rank_reports.py`: 13 cases (v0.3 per-rank route and aggregation).
-- `tests/test_compare_runs.py`: 20 cases (15 single-rank, 5 multi-rank).
+- `tests/test_rank_reports.py`: 16 cases (per-rank route, aggregation and v0.4
+  timing fields).
+- `tests/test_vmb_shapes.py`: 5 cases (census).
+- `tests/test_vmb_profile.py`: 2 cases.
+- `tests/test_compare_runs.py`: 23 cases (single-rank, multi-rank and relaxation).
 
 All pass. The tolerance per element, fixed before testing, is
 `1e-18·max S + 8(k+2)·2^-48·S_ij`.

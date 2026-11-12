@@ -57,6 +57,10 @@ struct vmb_snapshot {
     uint64_t stats[VMB_NSTAT];
     double max_check_ratio;
     const char *cpu_library;
+    /* Seconds inside zgemm_: GPU attempts (including declined checks) and the
+       OpenBLAS path; calls by decade of m*n*k (index 0 also holds work < 10). */
+    double try_s, cpu_s;
+    uint64_t work_decades[16];
 };
 void vmb_snapshot_get(struct vmb_snapshot *out);
 const char *vmb_mode_name(int mode);
