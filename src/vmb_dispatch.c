@@ -456,6 +456,7 @@ done:
     last_timing = (struct vmb_timing){
         .pack = job.t_pack, .encode = job.t_encode, .gpu = job.t_gpu, .wait = job.t_wait,
         .unpack = job.t_unpack, .finish = vmb_now() - t_finish, .total = vmb_now() - t_start,
+        .queue = job.t_queue, .wake = job.t_wake,
     };
     pthread_mutex_unlock(&gpu_lock);
     free(job.out);

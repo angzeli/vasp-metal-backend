@@ -68,9 +68,12 @@ enum vmb_mode { VMB_MODE_OFF = 0, VMB_MODE_AUTO, VMB_MODE_FORCE };
 /* Wall-time phases of the most recent GPU attempt, in seconds. gpu is the
    command-buffer execution interval from Metal timestamps (0 if unavailable);
    wait is host time blocked in waitUntilCompleted; finish covers validation,
-   optional shadow check and the write into C; total spans the whole attempt. */
+   optional shadow check and the write into C; total spans the whole attempt.
+   v0.5 splits wait: queue is commit to GPU start, wake is GPU end to the
+   return of waitUntilCompleted (both 0 without Metal timestamps). */
 struct vmb_timing {
     double pack, encode, gpu, wait, unpack, finish, total;
+    double queue, wake;
 };
 
 /* Reference-BLAS ZGEMM entry point (interposed). */

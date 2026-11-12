@@ -26,6 +26,7 @@ struct vmb_gpu_job {
     double *out;                 /* dense m x n, interleaved (re, im) */
     /* Filled by vmb_gpu_zgemm, seconds. */
     double t_pack, t_encode, t_gpu, t_wait, t_unpack;
+    double t_queue, t_wake;      /* commit -> GPU start, GPU end -> wake-up */
 };
 
 /* Lazily creates device, kernel and queue; returns 1 when usable. */
