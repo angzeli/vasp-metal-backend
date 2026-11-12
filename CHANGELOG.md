@@ -41,6 +41,9 @@ TiO2 PBE variable-cell relaxation at 4–8 ranks, on an idle MacBook Pro M3 Max:
   - FFTW is 40–41% of busy time.
   - Forced GPU results are VASP-verified, and forcing is 2.54× slower (112.6 s against
     44.4 s).
+- **HSE06 single point on the same cell** (CPU only, 13.5 h converged):
+  - ZGEMM falls to 0.008% of rank time, with 0 calls in the GPU-win region.
+  - FFTW (38–41%) and the Fock-exchange DGEMV (29–32%) dominate.
 
 ## 0.3.0 (merged, untagged)
 

@@ -1,8 +1,8 @@
 # v0.4 results: real-workload shapes, GPU correctness and end-to-end timing
 
 **Status:** v0.4 is a measurement release on one realistic system, TiO2 PBE, run on an
-otherwise idle MacBook Pro: a variable-cell relaxation, and a single point on the
-relaxed cell (§6).
+otherwise idle MacBook Pro: a variable-cell relaxation, a single point on the
+relaxed cell (§6), and an HSE06 hybrid single point on the same cell (§7).
 
 | Question | Result |
 | --- | --- |
@@ -12,6 +12,7 @@ relaxed cell (§6).
 | End-to-end, all ZGEMM forced onto the GPU | **2.60× slower:** 557.3 ± 6.7 s against 214.1 ± 1.5 s on the CPU, every force run slower than every off run |
 | Where the time goes | FFTW 38–39%, VASP's own code 18–20%, BLAS-2 DGEMV 15–16%, MPI 11–12%, ZGEMM 7–8% |
 | Single point on the relaxed cell (§6) | Same picture: ZGEMM 8.2%, 0 calls in the region, FFTW 40–41%; forced GPU VASP-verified and 2.54× slower |
+| HSE06 single point (§7) | ZGEMM falls to **0.008%** of rank time, 0 calls in the region; FFTW 38–41% and DGEMV 29–32% dominate |
 
 **Decisions.**
 - The pre-registered Gate A (an upper bound of at least 5% inside the GPU-win region) failed.
@@ -206,24 +207,92 @@ The census reconciles exactly with the evidence in all three runs.
 - ZGEMM is a fixed, small share (about 8%) of thin calls.
 - On this system the relaxation's ionic steps do not change which work limits the run.
 
+## 7. HSE06 single point on the relaxed cell
+
+**Why.** Exact exchange multiplies the work per band pair. This checks whether a hybrid
+functional moves any ZGEMM into the GPU's range.
+
+**Case** (user-provided `tio2-hse06-sp`): the §6 cell, KPOINTS and POTCAR.
+- **INCAR settings:** LHFCALC, HFSCREEN = 0.2, AEXX = 0.25, PRECFOCK = Normal,
+  LFOCKACE, ALGO = Normal, EDIFF = 1E-6, NELM = 100, IBRION = −1, NSW = 0,
+  NBANDS = 56.
+- **Start:** ISTART = 1 and ICHARG = 0, from the S1a PBE WAVECAR (the runner's
+  `--restart wavecar`).
+- **One edit:** the INCAR had an empty `NBANDS =`, which the runner's parser refuses.
+  It was set to 56, the PBE value, with the user's approval.
+- **Size:** 45 irreducible k-points, NKDIM = 256 in the full zone for the Fock
+  exchange, 56 bands.
+
+**Jobs.** Both at 8 ranks, NCORE = 1, KPAR = 1, backend `off`, and both exited 0 with
+complete 8/8 evidence.
+- **H1:** a 12 h limit. At about 65 min per electronic step that would not converge, so
+  after step 2 a STOPCAR (`LABORT`) ended it cleanly. The forces and stress ran anyway.
+- **H1b:** continued from H1's WAVECAR with a 7-day limit, as decided with the user.
+
+| Measure | H1 | H1b |
+| --- | --- | --- |
+| Elapsed | 14,467 s (4.0 h) | 48,648 s (13.5 h) |
+| Electronic steps | 2, stopped | 11, converged (dE −5.4e-7 eV) |
+| Final energy | — | **E = −132.28535645 eV** |
+| EDDAV per step | 3878, 3959 s | 3805–3902 s, mean 3832 s |
+| Exact-exchange forces and stress (FORHF) | 6622 s | 6476 s |
+| ZGEMM calls; distinct shapes | 143,422; 563 | 877,597; 633 |
+| ZGEMM rank-seconds | 5.8 | 32.9 |
+| ZGEMM share of rank time | **0.005%** | **0.008%** |
+| Calls in GPU-win region | **0**; m·n·k < 1e6 | **0**; m·n·k < 1e6 |
+
+The census reconciles exactly with the evidence in both runs. The top shapes are the
+§6 band-block shapes (56×8×592, 592×8×56, 256×56×56). About 80,000 ZGEMM calls per
+electronic step is close to the PBE rate, while each step takes about 85 times longer.
+
+**Profile.** H1, 2 ranks, 60 s windows about 3 and 30 min into the first step:
+
+| Work | Early, rank A / B | Late, rank A / B |
+| --- | --- | --- |
+| FFTW | 41.1 / 41.2% | 39.8 / 38.3% |
+| BLAS DGEMV (`rpromu_hf`, `racc0mu_hf`) | 32.0 / 31.9% | 31.0 / 29.1% |
+| VASP's own code | 15.8 / 15.6% | 15.9 / 14.7% |
+| BLAS gemm, sampled kernels all DGEMM | 7.6 / 7.6% | 7.7 / 7.1% |
+| MPI and runtime | 0 / 0% | 1.8 / 6.9% |
+| System and other | 3.6 / 3.7% | 3.8 / 3.9% |
+
+`fftw_md5putc` is among the top symbols. That suggests FFTW is planning again inside the
+exchange loop, which is worth checking in v0.5.
+
+**Timing.** Desktop apps were open, and in the first hour of H1b another process
+competed for CPU. H1b's later steps were at most 2.5% faster than its first, so the
+per-step figures stand as observed. No GPU run was made: with no ZGEMM time to save,
+the HSE launch budget (2) was used up by H1 and H1b.
+
+**Conclusion.**
+- With exact exchange, ZGEMM effectively disappears from the profile.
+- The cost moves to FFTs of the band-pair densities, and to real-space projector
+  DGEMV in the Fock routines.
+- A ZGEMM offload can save nothing here. Any GPU work for hybrids would have to target
+  FFT batching first, and the Fock DGEMV second.
+
 ## Limitations
 
 - **Scope:** one system on one host. The single point (§6) uses the same system and
-  settings. Open MPI synthetic topology, NCORE 1 or 4, KPAR 1,
+  settings, and the HSE06 point (§7) the same cell. Open MPI synthetic topology, NCORE 1 or 4, KPAR 1,
   LREAL .FALSE.
 - **Host:** desktop apps were running, though no other computation. The timing
   comparison is internally controlled (alternated, same binary), not a benchmark of the
   host.
-- **Profile:** statistical 10 s windows on 2 of 8 ranks, not a full trace.
-- **Other systems:** larger systems and hybrid functionals were not measured in v0.4.
+- **Profile:** statistical windows (10–60 s) on 2 of 8 ranks, not a full trace.
+- **HSE06:** one converged run (H1b), started from H1's partial SCF, on the CPU only.
+  Its first hour overlapped another CPU load.
+- **Other systems:** larger systems were not measured in v0.4.
 
 ## Next decision (v0.5)
 
 ZGEMM offload is capped at about 7.6% for this workload, and forcing it costs 2.6×.
 ZGEMM kernel work is not justified by this case. Candidates for v0.5, each to be
 measured before any GPU work:
-1. **FFT.** Record FFTW plan sizes and transforms per call (where it is 38–39% of busy
-   time here). A GPU FFT only pays off if many bands are transformed per call, against
+1. **FFT.** Record FFTW plan sizes and transforms per call (38–41% of busy time in
+   every TiO2 case, PBE and HSE06), and check whether HSE06 plans FFTs again inside the
+   exchange loop (`fftw_md5putc`). A GPU FFT only pays off if many bands are transformed per call, against
    about 250 µs of fixed cost per GPU call.
-2. **Larger systems** (the Co3O4 case) **and hybrid functionals,** where calls are
-   heavier, to see whether any library-level work grows into the GPU's range.
+2. **Larger systems** (the Co3O4 case), to see whether any library-level work grows
+   into the GPU's range. Hybrids do not help ZGEMM (§7): its share falls to 0.008%,
+   and the Fock DGEMV (29–32%) is the second target.
