@@ -46,7 +46,7 @@ LIBS      = $(BUILD)/libvmb.a -framework Metal -framework Foundation -lobjc \
 
 .PHONY: all test test-python bench clean FORCE
 all: $(BUILD)/libvmb.a $(BUILD)/test_zgemm $(BUILD)/test_fortran_abi $(BUILD)/shape_replay \
-     $(BUILD)/rank_probe $(BUILD)/test_blas_fftw
+     $(BUILD)/rank_probe $(BUILD)/test_blas_fftw $(BUILD)/blas_replay
 
 $(BUILD):
 	mkdir -p $@
@@ -92,6 +92,11 @@ $(BUILD)/test_fortran_abi: tests/test_fortran_abi.f90 $(BUILD)/libvmb.a
 
 $(BUILD)/shape_replay: bench/shape_replay.c $(BUILD)/libvmb.a
 	$(CC) $(CFLAGS) $< $(LIBS) -o $@
+
+# DGEMV/DGEMM replay, OpenBLAS against Accelerate: linked to OpenBLAS directly,
+# without libvmb.a, so the measured calls do not pass through the interposer.
+$(BUILD)/blas_replay: bench/blas_replay.c | $(BUILD)
+	$(CC) $(CFLAGS) $< -L$(OPENBLAS)/lib -lopenblas -o $@
 
 # Harmless per-rank report fixture: calls zgemm_ only on chosen ranks.
 $(BUILD)/rank_probe: tests/rank_probe.c $(BUILD)/libvmb.a
