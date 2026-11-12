@@ -96,6 +96,18 @@ class ProfileRouteTest(unittest.TestCase):
         self.assertNotIn(str(self.dir), text)
         self.assertNotIn('/', text)  # basenames only, no paths
 
+    def test_large_profile_is_read_whole(self):
+        # Real VASP profiles are far above the 64 KiB report limit.
+        self.run_ranks(world=1, VMB_PROFILE='1')
+        path = self.dir / 'rank-00000.profile.json'
+        doc = json.loads(path.read_text())
+        doc['blas']['padding'] = ['x' * 100] * 2000
+        path.write_text(json.dumps(doc))
+        self.assertGreater(path.stat().st_size, 150 * 1024)
+        result = self.aggregate(world=1)
+        self.assertEqual(result['evidence'], 'COMPLETE', result['problems'])
+        self.assertEqual(result['profile'], {'level': 'profile', 'ranks': [0]})
+
     def test_reuse_probe(self):
         self.run_ranks(world=1, VMB_PROFILE='reuse')
         result = self.aggregate(world=1)

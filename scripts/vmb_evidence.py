@@ -59,7 +59,7 @@ def _read_json(path, limit=MAX_REPORT_BYTES):
     _require(info.st_size <= limit, f'{path.name} exceeds {limit} bytes')
     fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
     with os.fdopen(fd, 'rb') as handle:
-        raw = handle.read(MAX_REPORT_BYTES + 1)
+        raw = handle.read(limit + 1)
     try:
         return json.loads(raw.decode('utf-8'), parse_constant=_reject_constant)
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
