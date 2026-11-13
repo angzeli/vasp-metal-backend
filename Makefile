@@ -51,7 +51,7 @@ LIBS      = $(BUILD)/libvmb.a -framework Metal -framework Foundation -lobjc \
 .PHONY: all test test-python bench clean FORCE
 all: $(BUILD)/libvmb.a $(BUILD)/test_zgemm $(BUILD)/test_fortran_abi $(BUILD)/shape_replay \
      $(BUILD)/rank_probe $(BUILD)/test_blas_fftw $(BUILD)/blas_replay \
-     $(BUILD)/test_accelerate_abi
+     $(BUILD)/test_accelerate_abi $(BUILD)/fftw_replay
 
 $(BUILD):
 	mkdir -p $@
@@ -112,6 +112,11 @@ $(BUILD)/accelerate-shim.o: scripts/accelerate-shim.c | $(BUILD)
 
 $(BUILD)/test_accelerate_abi: tests/test_accelerate_abi.f90 $(BUILD)/accelerate-shim.o
 	$(FC) $(FFLAGS) -J$(BUILD) -Wl,-framework,Accelerate $< $(BUILD)/accelerate-shim.o -o $@
+
+# FFT replay on VASP's shapes: loads the libfftw3 under test by path, so one
+# binary compares builds (v0.6, NEON against Homebrew's scalar build).
+$(BUILD)/fftw_replay: bench/fftw_replay.c | $(BUILD)
+	$(CC) $(CFLAGS) $< -o $@
 
 # Harmless per-rank report fixture: calls zgemm_ only on chosen ranks.
 $(BUILD)/rank_probe: tests/rank_probe.c $(BUILD)/libvmb.a
