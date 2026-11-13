@@ -137,8 +137,8 @@ host (by `run_bench.py`'s rule). Medians per call, in µs, for the five largest 
 | H2 (phase A) | OpenBLAS | — | — | — | — | 14,288 s |
 | H7 | OpenBLAS | 1st | 3,830 s | 3,826 s | 6,456 s | 14,115 s |
 | H8 | Accelerate | 2nd | 2,620 s | 2,611 s | 2,790 s | **8,024 s** |
-| H9 | Accelerate | 1st | pending | | | |
-| H10 | OpenBLAS | 2nd | pending | | | |
+| H9 | Accelerate | 1st | 2,689 s | 2,696 s | 2,855 s | **8,243 s** |
+| H10 | OpenBLAS | 2nd | running | | | |
 
 - **Pair 1: 1.76× faster end to end.** 1.46× per SCF step, and 2.31× on the post-SCF
   exact-exchange forces, the more DGEMV-bound phase (§3).
@@ -149,6 +149,13 @@ host (by `run_bench.py`'s rule). Medians per call, in µs, for the five largest 
     H7, H8). The gap matches v0.4's converged 3.55 eV.
 - **The OpenBLAS runs differ among themselves by as much.** TOTEN across H1, H2 and
   H7 spans 6e-8 eV, and H8 differs from H7 by 9e-8 eV.
+- **H9 repeats H8.** Run first this time, it is 2.7% slower than H8 (8,243 s against
+  8,024 s), and evenly so: +2.6–3.2% per SCF step, +2.3% after them. H2 and H7, two
+  OpenBLAS runs, are 1.2% apart. H9 ran in the daytime with the desktop in use; H7
+  and H8 ran overnight. Against H8, H9 is also `CPU A/B consistent`
+  (|dTOTEN|/N_atoms 4.2e-9 eV/atom, forces and band edges identical), so Accelerate
+  runs differ among themselves by about as much as OpenBLAS runs. The pair-2 ratio
+  is H10 against H9, from the same part of the day.
 
 ## 6. Cross-checks
 
@@ -175,7 +182,7 @@ The cache (`VMB_FFTW_PLAN_CACHE=1`, commit `dc394d6`) reuses repeated FFTW_ESTIM
 ## 8. Pending
 
 - **Phase G (H9, H10).** The same HSE06 pair in reverse order, Accelerate first, to
-  rule out an order or drift effect. Running.
+  rule out an order or drift effect. H9 is done (§5); H10 is running.
 - **PBE A/B.** DGEMV is 17% of PBE rank time, so the gain is capped at 1.2×. The
   replay can't predict it, because it covers none of PBE's shapes. Three ABBA pairs
   on the PBE single point (about 45 s each) would settle it.
@@ -190,6 +197,9 @@ The cache (`VMB_FFTW_PLAN_CACHE=1`, commit `dc394d6`) reuses repeated FFTW_ESTIM
   bits. They stay within the run-to-run spread of OpenBLAS here, but other systems
   need their own check.
 - **Profiles:** call timers on all ranks; `sample` windows of 20–60 s on 2 of 8 ranks.
+- **Host noise.** Run directories sit under an iCloud-synced Desktop, and the file
+  provider daemon was at 51–86% CPU when each HSE06 run ended, uploading its
+  roughly 120 MB of output. This affects both libraries alike, but adds spread.
 
 ## Next decision (v0.6)
 
