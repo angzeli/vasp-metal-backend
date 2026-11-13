@@ -111,15 +111,18 @@ option, not pursued in v0.5.
 `bench/blas_replay` replays the H1 shapes with one thread, in ABBA order, on a quiet
 host (by `run_bench.py`'s rule). Medians per call, in µs, for the five largest shapes:
 
-| Shape (share of HSE06 BLAS time) | OpenBLAS warm / cold | Accelerate warm / cold | 8 processes at once*: OpenBLAS / Accelerate |
+| Shape (share of HSE06 BLAS time) | OpenBLAS warm / cold | Accelerate warm / cold | 8 processes at once, cold*: OpenBLAS / Accelerate (slowest) |
 | --- | --- | --- | --- |
-| DGEMV N 324×25 (38%) | 12.4 / 12.2 | 0.8 / 1.4 | 13.5 / 5.8 |
-| DGEMV N 324×9 (28%) | 4.4 / 4.4 | 0.6 / 0.6 | 4.9 / 3.5 |
-| DGEMV T 324×25 (11%) | 8.1 / 8.0 | 0.7 / 1.3 | 9.0 / 3.1 |
-| DGEMV T 324×9 (8%) | 2.9 / 2.9 | 0.4 / 0.5 | 3.2 / 0.6 |
-| DGEMM T 25×88×2269 (5%) | 298 / 301 | 57 / 62 | 341 / 137 |
+| DGEMV N 324×25 (38%) | 12.4 / 12.2 | 0.8 / 1.4 | 13.7 / 4.4 (6.4) |
+| DGEMV N 324×9 (28%) | 4.4 / 4.4 | 0.6 / 0.6 | 4.9 / 1.6 (3.5) |
+| DGEMV T 324×25 (11%) | 8.1 / 8.0 | 0.7 / 1.3 | 9.1 / 3.8 (3.9) |
+| DGEMV T 324×9 (8%) | 2.9 / 2.9 | 0.4 / 0.5 | 3.2 / 0.6 (1.1) |
+| DGEMM T 25×88×2269 (5%) | 298 / 301 | 57 / 62 | 342 / 136 (396) |
 
-\* Exploratory: the host was busy, and the series was stopped after 5 of its steps.
+\* Exploratory: the host was busy, and the series was stopped after 5 of its 8 steps,
+so only the cold steps are complete (two per library, 8 replicas each). Median over
+all replicas and steps; in brackets, each step's slowest replica, which MPI ranks
+wait for. A quiet rerun is v0.6.
 
 - **Correctness.** Every shape matched the long-double reference exactly with both
   libraries. Replay inputs are exactly representable, so this checks that each
@@ -127,8 +130,10 @@ host (by `run_bench.py`'s rule). Medians per call, in µs, for the five largest 
 - **Raw wall time misleads.** The replay's total wall time is 4× in Accelerate's
   favour, but it weights shapes by replay count. Weighted by VASP's time per shape,
   Accelerate's BLAS is 8.3× faster warm and 6.6× cold.
-- **Under 8-way contention**, the gain falls to 2.1× on the same weighting: eight
-  copies of pure BLAS share each cluster's matrix units, and OpenBLAS barely notices.
+- **Under 8-way contention** (exploratory), the gain falls to 2.9× for the median
+  replica and 1.7× for the slowest, on the same weighting. Eight copies of pure BLAS
+  share each cluster's matrix units: Accelerate's replicas split into fast and slow
+  groups (324×9: 1.6 against 3.5 µs), while OpenBLAS barely notices.
 
 ## 5. End to end: DGEMV/DGEMM on Accelerate
 
@@ -197,7 +202,7 @@ OpenBLAS, Accelerate), on the v05f binaries, run back to back.
 | --- | --- | --- | --- |
 | Replay predicts the end-to-end gain | 1.75× (warm), 1.70× (cold) | 1.77× (H8 against mean of H2, H7) | **Yes** |
 | … per phase (Amdahl, 8.3× BLAS, sampled shares) | SCF 1.51×, forces 2.47× | 1.46×, 2.31× | Yes, slightly below |
-| 8-process replay predicts it | 1.33× | 1.77× | No: a pessimistic bound (§4) |
+| 8-process replay predicts it (exploratory) | 1.46× (median replica), 1.26× (slowest) | 1.76× | No: a pessimistic bound (§4) |
 | PBE gain within the Amdahl cap (DGEMV 17%) | ≤ 1.2× | 1.04× | Yes; implies about 1.3× on PBE's BLAS |
 | Order does not matter (ABBA) | | OpenBLAS first 1.759×, Accelerate first 1.761× | Yes |
 | OpenBLAS baseline reproduces | | H2 14,288 s, H7 14,115 s (1.2% apart, different commits) | Yes |
@@ -217,7 +222,8 @@ The cache (`VMB_FFTW_PLAN_CACHE=1`, commit `dc394d6`) reuses repeated FFTW_ESTIM
 
 ## 8. Pending
 
-- **8-process replay (r3-p8).** Rerun of the exploratory series in §4.
+- **8-process replay on a quiet host.** The rerun was stopped after 1 of its 8 steps
+  (the host was not quiet enough in the daytime); it moves to v0.6, overnight.
 
 ## Limitations
 
