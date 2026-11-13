@@ -98,6 +98,26 @@ class CompareRunsTest(unittest.TestCase):
         self.assertFails(self.run_pair(on={'iterations': 40, 'nelm': 40}), 'not converged')
         self.assertFails(self.run_pair_fresh(on={'ediff': False}), 'not converged')
 
+    def test_fixed_work_at_nelm_accepted(self):
+        capped = {'iterations': 2, 'nelm': 2, 'ediff': False}
+        write_run(self.root / 'off', report=OFF_REPORT, **capped)
+        write_run(self.root / 'on', **capped)
+        res = compare_runs.compare(self.root / 'off', self.root / 'on', fixed_work=True)
+        self.assertEqual(res['verdict'], 'VASP-verified', res['problems'])
+        self.assertFails(compare_runs.compare(self.root / 'off', self.root / 'on'), 'not converged')
+
+    def test_fixed_work_short_or_unequal_fails(self):
+        write_run(self.root / 'off', report=OFF_REPORT, iterations=2, nelm=2, ediff=False)
+        write_run(self.root / 'on', iterations=1, nelm=2)
+        res = compare_runs.compare(self.root / 'off', self.root / 'on', fixed_work=True)
+        self.assertFails(res, 'not NELM=2')
+        self.assertFails(res, 'electronic step counts differ')
+
+    def test_cpu_ab_both_off(self):
+        res = self.run_pair(on={'report': OFF_REPORT})
+        self.assertEqual(res['verdict'], 'CPU A/B consistent', res['problems'])
+        self.assertFails(self.run_pair_fresh(on={'report': OFF_REPORT, 'toten': -1.0}), 'exceeds')
+
     def run_pair_fresh(self, **kw):
         self.tearDown()
         self.setUp()
@@ -252,6 +272,12 @@ class RelaxationCompareTest(unittest.TestCase):
                 self.setUp()
                 self.assertFails(self.pair(**kwargs), fragment)
 
+    def test_fixed_work_refuses_relaxation(self):
+        write_relax(self.root / 'off', report=OFF_REPORT)
+        write_relax(self.root / 'on')
+        res = compare_runs.compare(self.root / 'off', self.root / 'on', fixed_work=True)
+        self.assertFails(res, 'single points only')
+
     def test_single_point_runs_unaffected(self):
         write_run(self.root / 'off', report=OFF_REPORT)
         write_run(self.root / 'on')
@@ -300,6 +326,8 @@ class MultiRankCompareTest(CompareRunsTest):
     test_incomplete_forces = test_mismatched_inputs = test_inconsistent_counters = None
     test_shadow_check_failures = test_energy_difference = test_off_run_must_not_use_gpu = None
     test_missing_report = test_v01_report_format = None
+    test_fixed_work_at_nelm_accepted = test_fixed_work_short_or_unequal_fails = None
+    test_cpu_ab_both_off = None
 
 
 if __name__ == '__main__':
