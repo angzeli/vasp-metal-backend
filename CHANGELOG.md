@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.4.0 (unreleased)
+## 0.4.0 (merged, untagged)
 
 A measurement release: whether realistic VASP workloads produce ZGEMM calls the
 GPU can win. Numerical policy, modes and the evidence contract are unchanged;
