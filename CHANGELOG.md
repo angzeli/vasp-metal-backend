@@ -1,5 +1,53 @@
 # Changelog
 
+## 0.6.0 (unreleased)
+
+CPU-only. This release places the v0.5 Accelerate gain against VASP linked directly
+to Accelerate (#9), measures a converged HSE06 run on each library and the FFTW
+plan cache (#8), and tests an FFTW built with NEON. The library itself is
+unchanged so far: every default build behaves as 0.5. Results (in progress):
+[docs/RESULTS-v0.6.md](docs/RESULTS-v0.6.md).
+
+### Added
+
+- **`scripts/relink-vasp.sh --direct-accelerate`.** It links VASP against
+  Accelerate with no `libvmb.a` and no OpenBLAS on the link line, for the #9
+  baseline.
+  - Accelerate is passed to the linker first (`-Wl,-framework,Accelerate`).
+    Open MPI's `mpifort` links with `-flat_namespace` and Homebrew's ScaLAPACK loads
+    OpenBLAS, so otherwise VASP silently runs OpenBLAS.
+  - `relink.txt` records the variant, the namespace, the load order and the BLAS
+    ScaLAPACK loads.
+- **`scripts/accelerate-shim.c`.** gfortran-convention `zdotc_` and `cdotc_` over
+  Accelerate's CBLAS: Accelerate's legacy versions use the f2c convention and crash
+  when called from VASP.
+- **`tests/test_accelerate_abi.f90`.** It calls every value-returning BLAS/LAPACK
+  function VASP imports, as VASP declares them, against Accelerate with the shim.
+  `make test` runs it.
+- **`scripts/relink-vasp.sh --fftw-prefix`.** It links another FFTW install of the
+  same version, such as a NEON build. Every `relink.txt` now records the FFTW path
+  and digest.
+- **`bench/fftw_replay`.** It replays observed FFT shapes as VASP calls them (plan
+  with `FFTW_ESTIMATE`, execute once, destroy) on any libfftw3 loaded by path,
+  timing planning and execution separately, with a direct-DFT accuracy check and
+  cross-library comparison.
+- **`compare_runs.py --no-backend off|on`.** It declares that one run carries no
+  backend, as with VASP linked directly against a BLAS. That run must have no
+  backend report, and counts as off mode for `CPU A/B consistent`.
+
+### Findings so far
+
+- **Direct Accelerate:** every BLAS/LAPACK symbol VASP imports is in Accelerate
+  except two ScaLAPACK helpers. With the shim and Accelerate loaded first, a
+  sampled rank runs only Accelerate's BLAS, and the PBE single point matches the
+  interposer route (identical TOTEN and forces).
+- **FFTW plan cache:** on the PBE single point it hits 294,576 times against 16
+  misses per run, with bit-identical results. Timing on a busy host was
+  inconclusive (pair ratios 0.97–1.07×).
+- **NEON FFTW:** Homebrew's FFTW has no SIMD on Apple Silicon. A NEON build
+  executes VASP's TiO2 transforms 1.29× (HSE06 shapes) and 1.26× (PBE shapes)
+  faster in the standalone replay, with the same accuracy.
+
 ## 0.5.0 (2026-11-13)
 
 v0.4 showed that ZGEMM is not where TiO2's time goes. This release times DGEMV,

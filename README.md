@@ -51,6 +51,12 @@ CPU-side routes: DGEMV/DGEMM on Accelerate (`VMB_DBLAS_LIBRARY`), and an FFTW pl
 cache (`VMB_FFTW_PLAN_CACHE`, not yet measured on VASP). Results are in
 [docs/RESULTS-v0.5.md](docs/RESULTS-v0.5.md).
 
+v0.6 (in progress, CPU only) places the v0.5 gain against VASP linked directly to
+Accelerate, measures a converged HSE06 run on each library and the FFTW plan cache,
+and tests an FFTW built with NEON. Decision rules and results so far are in
+[docs/RESULTS-v0.6.md](docs/RESULTS-v0.6.md); see also
+[VASP with Accelerate or a NEON FFTW](#vasp-with-accelerate-or-a-neon-fftw).
+
 - **Correctness is not speedup.** The verified Si2 integrations show that GPU
   results can feed a converging SCF without changing the energy. At those sizes
   the GPU path is slower: VASP's elapsed time was 0.296 s with the backend off
@@ -150,6 +156,12 @@ the run reports per-phase medians and quartiles.
 times observed DGEMV/DGEMM shapes with one thread, warm or with a cold matrix pool
 (`--cold-mb`), against an exact reference.
 
+`build/fftw_replay replay SHAPES.tsv --lib PATH/libfftw3.dylib --output NEW.tsv`
+replays observed FFT shapes as VASP calls them (plan with `FFTW_ESTIMATE`, execute
+once, destroy) on any libfftw3 loaded by path, timing planning and execution
+separately. Complex results are checked against a direct DFT; `--dump` and
+`fftw_replay compare A B` check agreement between two FFTW builds.
+
 ## Use with a private VASP build
 
 ```sh
@@ -171,6 +183,8 @@ group, no retries.
   - `--fixed-work` compares single points capped at exactly NELM electronic steps.
   - Two off-mode runs that agree are classed CPU A/B consistent (exit 4), as for an
     A/B of `VMB_DBLAS_LIBRARY`.
+  - `--no-backend off|on` declares that one run has no backend (VASP linked
+    directly against a BLAS): it must have no backend report and counts as off.
 - `scripts/vmb_shapes.py census RUN_DIR --output OUT.json` merges a managed run's
   per-rank telemetry into one shape census. It reconciles the calls with the attempt
   evidence and bounds the share of rank time a region rule could save.
@@ -194,6 +208,28 @@ group, no retries.
 | `VMB_MAX_WORK` | 2^34 | maximum m·n·k sent to the GPU |
 | `VMB_MAX_BYTES` | 2^30 | maximum packed buffer size |
 | `VMB_TEST_NO_DEVICE`, `VMB_TEST_FAULT`, `VMB_TEST_AUTO_MIN_WORK` | off | test-only hooks |
+
+### VASP with Accelerate or a NEON FFTW
+
+Two findings from v0.6 for anyone building VASP on Apple Silicon with Homebrew's
+toolchain (Open MPI, ScaLAPACK, FFTW), independent of this backend:
+
+- **Linking VASP directly against Accelerate needs two fixes.**
+  - Accelerate's legacy `zdotc_` and `cdotc_` return their result the f2c way and
+    crash when called from gfortran code. `scripts/accelerate-shim.c` replaces
+    both; `make test` checks every value-returning BLAS/LAPACK function VASP
+    imports (`tests/test_accelerate_abi.f90`).
+  - Open MPI's `mpifort` links with `-flat_namespace`, and Homebrew's ScaLAPACK
+    loads OpenBLAS. With `-framework Accelerate` in the usual place, VASP silently
+    runs OpenBLAS. Pass `-Wl,-framework,Accelerate` ahead of the objects so
+    Accelerate loads first, and check a running rank with `sample`.
+  - `scripts/relink-vasp.sh --direct-accelerate OBJECT_DIR NEW_DIR` does both and
+    records the load order. ScaLAPACK's own BLAS calls still go to OpenBLAS.
+- **Homebrew's FFTW has no SIMD on Apple Silicon.** Its formula enables SIMD only
+  on Intel. FFTW 3.3.11 configured with `--enable-neon` executes VASP's TiO2
+  transforms 1.26–1.29× faster in the standalone replay, with the same accuracy.
+  `scripts/relink-vasp.sh --fftw-prefix PREFIX` links such a build. End-to-end
+  timing is in [docs/RESULTS-v0.6.md](docs/RESULTS-v0.6.md).
 
 ## Standalone results (Apple M3 Max)
 
