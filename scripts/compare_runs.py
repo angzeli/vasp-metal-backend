@@ -14,10 +14,19 @@ are aggregated by scripts/vmb_evidence.py, the one acceptance model. Classes:
                        |dTOTEN| / N_atoms <= 1e-5 eV/atom
   CPU-only consistent  both runs valid, the on-run was in auto mode and served
                        every call on the CPU (a valid run, not GPU integration)
+  CPU A/B consistent   both runs valid and in off mode, neither used the GPU,
+                       within the same energy threshold: an A/B of a CPU-side
+                       setting such as VMB_DBLAS_LIBRARY (v0.5)
   FAILED               any check below failed
 
-Exit status: 0 VASP-verified, 3 CPU-only consistent, 1 FAILED.
+--fixed-work: single points capped at exactly NELM electronic steps
+(NELMIN = NELM), compared at equal work. Such a run is valid without EDIFF
+convergence when it made exactly NELM steps, and both runs must make the same
+number. Not accepted for ionic relaxations.
+
+Exit status: 0 VASP-verified, 3 CPU-only consistent, 4 CPU A/B consistent, 1 FAILED.
 """
+import argparse
 import hashlib
 import importlib.util
 import math
@@ -172,13 +181,18 @@ def counters(rep):
             'ratio': float(rep.get('vmb.max_check_ratio', 'nan'))}
 
 
-def check_run(name, r):
+def check_run(name, r, fixed_work=False):
     p = []
     if r['exit'] != '0' or r['reason'] != 'completed':
         p.append(f'{name}: abnormal exit (exit={r["exit"]}, reason={r["reason"]})')
     if not r['normal_end']:
         p.append(f'{name}: no normal-termination timing block')
-    if not r['converged']:
+    if fixed_work and r.get('relaxation'):
+        p.append(f'{name}: --fixed-work applies to single points only, not ionic relaxations')
+    elif fixed_work:
+        if r['nelm'] is None or r['iterations'] != r['nelm']:
+            p.append(f'{name}: fixed-work run made {r["iterations"]} electronic steps, not NELM={r["nelm"]}')
+    elif not r['converged']:
         if r.get('relaxation'):
             p.append(f'{name}: an ionic step ended without electronic convergence '
                      f'(electronic steps per ionic step {r["scf_per_ionic"]}, NELM={r["nelm"]})')
@@ -229,12 +243,14 @@ def check_run(name, r):
     return p, c
 
 
-def compare(off_dir, on_dir):
+def compare(off_dir, on_dir, fixed_work=False):
     off, on = parse(off_dir), parse(on_dir)
     problems = []
-    p_off, c_off = check_run('off', off)
-    p_on, c_on = check_run('on', on)
+    p_off, c_off = check_run('off', off, fixed_work)
+    p_on, c_on = check_run('on', on, fixed_work)
     problems += p_off + p_on
+    if fixed_work and off['iterations'] != on['iterations']:
+        problems.append(f"electronic step counts differ ({off['iterations']} vs {on['iterations']})")
     mismatched = [n for n in INPUTS if off['digests'][n] is None or off['digests'][n] != on['digests'][n]]
     if mismatched:
         problems.append('inputs differ or missing: ' + ', '.join(mismatched))
@@ -272,16 +288,18 @@ def compare(off_dir, on_dir):
         verdict = 'VASP-verified'
     elif c_on and c_on['mode'] == 'auto':
         verdict = 'CPU-only consistent'
+    elif c_on and c_on['mode'] == 'off' and not c_on['consumed'] and not c_on['submitted']:
+        verdict = 'CPU A/B consistent'
     else:
         verdict = 'FAILED'
         problems.append('on-run consumed no GPU result and was not an auto-mode run')
     return {'off': off, 'on': on, 'c_off': c_off, 'c_on': c_on, 'delta': delta,
             'fdiff': fdiff, 'sdiff': sdiff, 'ldiff': ldiff, 'relaxation': bool(relaxation),
-            'verdict': verdict, 'problems': problems}
+            'fixed_work': fixed_work, 'verdict': verdict, 'problems': problems}
 
 
-def main(off_dir, on_dir):
-    res = compare(off_dir, on_dir)
+def main(off_dir, on_dir, fixed_work=False):
+    res = compare(off_dir, on_dir, fixed_work)
     for name in ('off', 'on'):
         r, c = res[name], res['c_' + name]
         print(f'{name}: exit={r["exit"]} TOTEN={r["toten"]} eV iterations={r["iterations"]} '
@@ -310,11 +328,17 @@ def main(off_dir, on_dir):
         print(f'max |dlattice| component = {res["ldiff"]:.3e} A')
     for p in res['problems']:
         print('PROBLEM:', p)
+    if res['fixed_work']:
+        print(f"fixed work: {res['off']['iterations']} electronic steps (NELM={res['off']['nelm']})")
     print('VERDICT:', res['verdict'])
-    return {'VASP-verified': 0, 'CPU-only consistent': 3}.get(res['verdict'], 1)
+    return {'VASP-verified': 0, 'CPU-only consistent': 3, 'CPU A/B consistent': 4}.get(res['verdict'], 1)
 
 
 if __name__ == '__main__':
-    if len(sys.argv) != 3:
-        sys.exit('usage: compare_runs.py OFF_DIR ON_DIR')
-    sys.exit(main(sys.argv[1], sys.argv[2]))
+    ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    ap.add_argument('--fixed-work', action='store_true',
+                    help='single points capped at exactly NELM steps, compared at equal work')
+    ap.add_argument('off_dir')
+    ap.add_argument('on_dir')
+    a = ap.parse_args()
+    sys.exit(main(a.off_dir, a.on_dir, a.fixed_work))

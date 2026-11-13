@@ -11,6 +11,9 @@ Standard library only. Reads files; writes only the explicitly named outputs.
 
   census   RUN_DIR [--region mn=16384,mnk=1.5e7 ...] [--output NEW.json]
            [--replay NEW.tsv --label LABEL [--role select|holdout] [--top N]]
+  profile  RUN_DIR [--output NEW.json] [--top N]
+           v0.5: merges rank-RRRRR.profile.json (DGEMV, DGEMM, FFTW) into one census:
+           shares of rank time, call sites, FFT plan sizes and repeated planning.
 """
 import argparse
 import json
@@ -163,6 +166,185 @@ def census(run_dir, regions):
     return result
 
 
+PROFILE_NAME = re.compile(r'rank-([0-9]{5})\.profile\.json\Z')
+
+
+def _run_wall(run_dir):
+    meta = {}
+    if (run_dir / 'RUN_METADATA.txt').exists():
+        for line in (run_dir / 'RUN_METADATA.txt').read_text(errors='replace').splitlines():
+            key, sep, value = line.partition(': ')
+            if sep:
+                meta[key] = value
+    return float(meta['elapsed_s']) if 'elapsed_s' in meta else None
+
+
+def _site_key(site):
+    return None if site is None else (site.get('image'), site.get('offset'))
+
+
+def _site_label(site):
+    if not site:
+        return 'unknown'
+    sym = site.get('symbol') or '?'
+    off = site.get('symbol_offset')
+    return f"{sym}+{off}" if off is not None else sym
+
+
+def _blas_cost(shape):
+    """Flops and an estimate of bytes moved for one call (double precision)."""
+    m, n = shape['m'], shape['n']
+    if shape['op'] == 'dgemv':
+        tr = shape['trans'] not in 'Nn'
+        lx, ly = (m, n) if tr else (n, m)
+        flops = 2.0 * m * n
+        bytes_ = 8.0 * (m * n + lx + ly * (1 if shape['beta'] == 'zero' else 2))
+    else:
+        k = shape['k']
+        flops = 2.0 * m * n * k
+        bytes_ = 8.0 * (m * k + k * n + m * n * (1 if shape['beta'] == 'zero' else 2))
+    return flops, bytes_
+
+
+def profile(run_dir, top=30):
+    """Attempt-level census of the v0.5 profile files of one run."""
+    run_dir = Path(run_dir)
+    files = sorted(p for p in (run_dir / 'vmb-reports').iterdir() if PROFILE_NAME.fullmatch(p.name))
+    if not files:
+        raise CensusError('no rank profile files; was the run made with a profiling build?')
+    docs = {}
+    for path in files:
+        doc = json.loads(path.read_text())
+        rank = int(PROFILE_NAME.fullmatch(path.name).group(1))
+        if (doc.get('schema') != 'vmb.rank-profile.v1' or doc.get('complete') is not True
+                or doc.get('rank') != rank):
+            raise CensusError(f'{path.name}: not a complete vmb.rank-profile.v1 for rank {rank}')
+        docs[rank] = doc
+    levels = {d['level'] for d in docs.values()}
+    attempts = {d['attempt_id'] for d in docs.values()}
+    worlds = {d['world_size'] for d in docs.values()}
+    if len(levels) != 1 or len(attempts) != 1 or len(worlds) != 1:
+        raise CensusError('profile files disagree on level, attempt or world size')
+    world = worlds.pop()
+    elapsed = _run_wall(run_dir)
+    rank_time = world * elapsed if elapsed else None
+    result = {'schema': 'vmb.profile-census.v1', 'run_dir': str(run_dir), 'level': levels.pop(),
+              'ranks': sorted(docs), 'world_size': world, 'elapsed_s': elapsed,
+              'reconciliation': None}
+    evidence_path = run_dir / 'vmb-evidence.json'
+    if evidence_path.exists():
+        ev = json.loads(evidence_path.read_text())
+        declared = (ev.get('profile') or {}).get('ranks')
+        result['reconciliation'] = {
+            'evidence_status': ev.get('evidence'), 'evidence_profile_ranks': declared,
+            'agrees': ev.get('evidence') == 'COMPLETE' and declared == sorted(docs)
+            and sorted(docs) == list(range(world)) and ev.get('attempt_id') in attempts}
+
+    def share(seconds):
+        return seconds / rank_time if rank_time else None
+
+    # BLAS: totals, per-rank seconds, shapes (merged over ranks) and call sites.
+    blas = {'dropped_keys': sum(d['blas']['dropped_keys'] for d in docs.values()), 'ops': {}}
+    for op in ('dgemv', 'dgemm'):
+        per_rank = [docs[r]['blas']['totals'][op]['seconds'] for r in sorted(docs)]
+        calls = sum(docs[r]['blas']['totals'][op]['calls'] for r in docs)
+        secs = sum(per_rank)
+        blas['ops'][op] = {'calls': calls, 'rank_seconds': secs, 'share_of_rank_time': share(secs),
+                           'per_rank_seconds': per_rank,
+                           'imbalance_max_over_mean': (max(per_rank) / (secs / len(per_rank))
+                                                       if secs else None)}
+    merged, sites = {}, {}
+    for rank, doc in docs.items():
+        for sh in doc['blas']['shapes']:
+            dims = tuple(sh.get(k) for k in ('op', 'm', 'n', 'k', 'trans', 'transa', 'transb', 'lda',
+                                             'ldb', 'ldc', 'incx', 'incy', 'alpha', 'beta'))
+            key = dims + (_site_key(sh['site']),)
+            e = merged.setdefault(key, {**{k: v for k, v in sh.items()
+                                           if k not in ('calls', 'seconds', 'max_seconds')},
+                                        'calls': 0, 'seconds': 0.0, 'max_seconds': 0.0, 'ranks': set()})
+            e['calls'] += sh['calls']
+            e['seconds'] += sh['seconds']
+            e['max_seconds'] = max(e['max_seconds'], sh['max_seconds'])
+            e['ranks'].add(rank)
+            skey = (sh['op'], _site_key(sh['site']))
+            se = sites.setdefault(skey, {'op': sh['op'], 'site': _site_label(sh['site']),
+                                         'offset': (sh['site'] or {}).get('offset'),
+                                         'calls': 0, 'seconds': 0.0, 'flops': 0.0, 'bytes': 0.0,
+                                         'shapes': set()})
+            flops, bytes_ = _blas_cost(sh)
+            se['calls'] += sh['calls']
+            se['seconds'] += sh['seconds']
+            se['flops'] += flops * sh['calls']
+            se['bytes'] += bytes_ * sh['calls']
+            se['shapes'].add(dims)
+    rows = []
+    for e in sorted(merged.values(), key=lambda e: -e['seconds']):
+        flops, bytes_ = _blas_cost(e)
+        rows.append({**{k: v for k, v in e.items() if k not in ('ranks', 'site')},
+                     'site': _site_label(e['site']), 'ranks': len(e['ranks']),
+                     'mean_us': 1e6 * e['seconds'] / e['calls'],
+                     'flops_per_byte': flops / bytes_ if bytes_ else None,
+                     'gflops': flops * e['calls'] / e['seconds'] * 1e-9 if e['seconds'] else None,
+                     'share_of_rank_time': share(e['seconds'])})
+    blas['distinct_keys'] = len(rows)
+    blas['top_shapes'] = rows[:top]
+    blas['sites'] = [{**{k: v for k, v in se.items() if k != 'shapes'}, 'distinct_shapes': len(se['shapes']),
+                      'share_of_rank_time': share(se['seconds']),
+                      'flops_per_byte': se['flops'] / se['bytes'] if se['bytes'] else None,
+                      'gflops': se['flops'] / se['seconds'] * 1e-9 if se['seconds'] else None}
+                     for se in sorted(sites.values(), key=lambda x: -x['seconds'])][:top]
+    result['blas'] = blas
+
+    # FFTW: planning against execution, merged over call sites and ranks.
+    tot = {k: sum(d['fftw']['totals'][k] for d in docs.values())
+           for k in ('plans', 'plan_seconds', 'executes', 'execute_seconds')}
+    fftw = {'totals': {**tot, 'plan_share_of_rank_time': share(tot['plan_seconds']),
+                       'execute_share_of_rank_time': share(tot['execute_seconds'])},
+            'dropped_shapes': sum(d['fftw']['dropped_shapes'] for d in docs.values()),
+            'untracked_plans': sum(d['fftw']['untracked_plans'] for d in docs.values()),
+            'unknown_executes': sum(d['fftw']['unknown_executes'] for d in docs.values())}
+    problems = {}
+    for rank, doc in docs.items():
+        for sh in doc['fftw']['shapes']:
+            key = tuple(json.dumps(sh[k]) for k in ('kind', 'rank', 'n', 'howmany', 'istride', 'idist',
+                                                    'ostride', 'odist', 'sign', 'flags', 'inplace'))
+            e = problems.setdefault(key, {k: sh[k] for k in ('kind', 'rank', 'n', 'howmany', 'istride',
+                                                            'idist', 'ostride', 'odist', 'sign',
+                                                            'flags', 'inplace')})
+            for k in ('plans', 'destroyed', 'plan_seconds', 'executes', 'new_array_executes',
+                      'execute_seconds'):
+                e[k] = e.get(k, 0) + sh[k]
+            e.setdefault('sites', set()).add(_site_label(sh['site']))
+            e.setdefault('ranks', set()).add(rank)
+    fftw['shapes'] = [{**{k: v for k, v in e.items() if k not in ('sites', 'ranks')},
+                       'sites': sorted(e['sites']), 'ranks': len(e['ranks']),
+                       'executes_per_plan': e['executes'] / e['plans'] if e['plans'] else None,
+                       'mean_plan_us': 1e6 * e['plan_seconds'] / e['plans'] if e['plans'] else None,
+                       'mean_execute_us': (1e6 * e['execute_seconds'] / e['executes']
+                                           if e['executes'] else None),
+                       'plan_share_of_rank_time': share(e['plan_seconds']),
+                       'execute_share_of_rank_time': share(e['execute_seconds'])}
+                      for e in sorted(problems.values(),
+                                      key=lambda e: -(e['plan_seconds'] + e['execute_seconds']))][:top]
+    result['fftw'] = fftw
+
+    if result['level'] == 'reuse':
+        reuse = {}
+        for doc in docs.values():
+            for st in doc['blas']['reuse']['sites']:
+                e = reuse.setdefault(_site_key(st['site']), {'site': _site_label(st['site']), 'calls': 0,
+                                                             'same_content': 0, 'same_pointer_changed': 0,
+                                                             'feeds_next': 0, 'runs': [0] * 8})
+                for k in ('calls', 'same_content', 'same_pointer_changed', 'feeds_next'):
+                    e[k] += st[k]
+                e['runs'] = [a + b for a, b in zip(e['runs'], st['runs'])]
+        result['reuse'] = {'run_buckets': docs[min(docs)]['blas']['reuse']['run_buckets'],
+                           'feeds_from_previous_call': sum(d['blas']['reuse']['feeds_from_previous_call']
+                                                           for d in docs.values()),
+                           'sites': sorted(reuse.values(), key=lambda e: -e['calls'])[:top]}
+    return result
+
+
 def replay_rows(shapes, label, role, top, region=None):
     """Rows for bench/shape_replay in the bench/shapes-v0.2.tsv column format."""
     rows = []
@@ -194,7 +376,32 @@ def main(argv=None):
     c.add_argument('--label', default='observed')
     c.add_argument('--role', choices=('select', 'holdout'), default='select')
     c.add_argument('--top', type=int, default=12)
+    pr = sub.add_parser('profile')
+    pr.add_argument('run_dir', type=Path)
+    pr.add_argument('--output', type=Path, help='new JSON file; never overwritten')
+    pr.add_argument('--top', type=int, default=30)
     args = parser.parse_args(argv)
+    if args.command == 'profile':
+        try:
+            result = profile(args.run_dir, args.top)
+        except (CensusError, OSError, ValueError, KeyError) as exc:
+            print(f'profile census failed: {exc}', file=sys.stderr)
+            return 1
+        if args.output:
+            with open(args.output, 'x') as handle:
+                json.dump(result, handle, indent=1, sort_keys=True)
+
+        def pct(v):
+            return 'n/a' if v is None else f'{100 * v:.2f}%'
+        ops, f = result['blas']['ops'], result['fftw']['totals']
+        print(f"ranks={len(result['ranks'])} level={result['level']} "
+              f"reconciled={(result['reconciliation'] or {}).get('agrees')}")
+        for op in ('dgemv', 'dgemm'):
+            print(f"{op}: calls={ops[op]['calls']} rank_s={ops[op]['rank_seconds']:.3f} "
+                  f"share={pct(ops[op]['share_of_rank_time'])}")
+        print(f"fftw: plans={f['plans']} plan_share={pct(f['plan_share_of_rank_time'])} "
+              f"executes={f['executes']} execute_share={pct(f['execute_share_of_rank_time'])}")
+        return 0 if (result['reconciliation'] or {}).get('agrees', True) else 3
     try:
         result = census(args.run_dir, args.region or [DEFAULT_REGION])
     except (CensusError, OSError, ValueError) as exc:

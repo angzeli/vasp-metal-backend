@@ -196,8 +196,10 @@ int main(int argc, char **argv)
                  "work\tbytes\tstatus\treps\terr_tol\tdeterministic\t"
                  "cpu_med\tcpu_p25\tcpu_p75\tcpu_min\tcpu_max\t"
                  "gpu_med\tgpu_p25\tgpu_p75\tgpu_min\tgpu_max\tcpu_over_gpu\tverdict\t"
-                 "pack_med\tencode_med\tgpu_exec_med\twait_med\tunpack_med\tfinish_med\n");
-    fprintf(raw, "id\trep\tfirst\tcpu_s\tgpu_s\tpack\tencode\tgpu_exec\twait\tunpack\tfinish\n");
+                 "pack_med\tencode_med\tgpu_exec_med\twait_med\tunpack_med\tfinish_med\t"
+                 "queue_med\twake_med\n");
+    fprintf(raw, "id\trep\tfirst\tcpu_s\tgpu_s\tpack\tencode\tgpu_exec\twait\tunpack\tfinish\t"
+                 "queue\twake\n");
     if (!have_device) {
         fprintf(stderr, "no Metal device\n");
         return 1;
@@ -259,7 +261,7 @@ int main(int argc, char **argv)
         vmb_stats_get(after);
         double err_tol = INFINITY;
         int deterministic = 1, done = 0;
-        double cpu[MAX_REPS], gpu[MAX_REPS], ph[6][MAX_REPS];
+        double cpu[MAX_REPS], gpu[MAX_REPS], ph[8][MAX_REPS];
         if (after[VMB_STAT_CONSUMED] - before[VMB_STAT_CONSUMED] != 1) {
             status = "not-offloaded";
         } else {
@@ -297,12 +299,13 @@ int main(int argc, char **argv)
                     cpu[r] = now() - t0;
                 }
             }
-            double phase[6] = {tm.pack, tm.encode, tm.gpu, tm.wait, tm.unpack, tm.finish};
-            for (int p = 0; p < 6; p++)
+            double phase[8] = {tm.pack, tm.encode, tm.gpu, tm.wait, tm.unpack, tm.finish,
+                               tm.queue, tm.wake};
+            for (int p = 0; p < 8; p++)
                 ph[p][r] = phase[p];
-            fprintf(raw, "%s\t%d\t%s\t%.9f\t%.9f\t%.9f\t%.9f\t%.9f\t%.9f\t%.9f\t%.9f\n", s->id, r,
-                    gpu_first ? "gpu" : "cpu", cpu[r], gpu[r], tm.pack, tm.encode, tm.gpu,
-                    tm.wait, tm.unpack, tm.finish);
+            fprintf(raw, "%s\t%d\t%s\t%.9f\t%.9f\t%.9f\t%.9f\t%.9f\t%.9f\t%.9f\t%.9f\t%.9f\t%.9f\n",
+                    s->id, r, gpu_first ? "gpu" : "cpu", cpu[r], gpu[r], tm.pack, tm.encode,
+                    tm.gpu, tm.wait, tm.unpack, tm.finish, tm.queue, tm.wake);
             done = r + 1;
         }
         if (!deterministic)
@@ -321,7 +324,7 @@ int main(int argc, char **argv)
                     cmed, quantile(cpu, done, 0.25), quantile(cpu, done, 0.75), cmin, cmax, gmed,
                     quantile(gpu, done, 0.25), quantile(gpu, done, 0.75), gmin, gmax, cmed / gmed,
                     verdict);
-            for (int p = 0; p < 6; p++)
+            for (int p = 0; p < 8; p++)
                 fprintf(sum, "\t%.6e", quantile(ph[p], done, 0.5));
         }
         fprintf(sum, "\n");

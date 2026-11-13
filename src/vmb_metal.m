@@ -137,6 +137,7 @@ int vmb_gpu_zgemm(struct vmb_gpu_job *job, int *submitted)
 {
     *submitted = 0;
     job->t_pack = job->t_encode = job->t_gpu = job->t_wait = job->t_unpack = 0.0;
+    job->t_queue = job->t_wake = 0.0;
     double t0 = vmb_now();
     size_t na = (size_t)job->rows_a * job->cols_a, nb = (size_t)job->rows_b * job->cols_b;
     size_t mn = (size_t)job->m * job->n;
@@ -187,8 +188,12 @@ int vmb_gpu_zgemm(struct vmb_gpu_job *job, int *submitted)
         job->t_wait = t3 - t2;
         if (cb.status != MTLCommandBufferStatusCompleted || cb.error)
             return -1;
-        if (cb.GPUEndTime > cb.GPUStartTime)
+        if (cb.GPUEndTime > cb.GPUStartTime) {
             job->t_gpu = cb.GPUEndTime - cb.GPUStartTime;
+            /* Metal's GPU timestamps share the host's mach time base with vmb_now. */
+            job->t_queue = cb.GPUStartTime - t2;
+            job->t_wake = t3 - cb.GPUEndTime;
+        }
 
         const float *o = out.contents;
         if (exact_factor(job->so)) {

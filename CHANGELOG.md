@@ -1,6 +1,73 @@
 # Changelog
 
-## 0.4.0 (unreleased)
+## 0.5.0 (2026-11-13)
+
+v0.4 showed that ZGEMM is not where TiO2's time goes. This release times DGEMV,
+DGEMM and FFTW instead, and adds two opt-in CPU-side routes. The numerical policy,
+the ZGEMM modes and the evidence contract are unchanged, `auto` still has no
+regions, and every default build behaves as 0.4. Results:
+[docs/RESULTS-v0.5.md](docs/RESULTS-v0.5.md).
+
+### Added
+
+- **DGEMV, DGEMM and FFTW profiling behind the interposer.**
+  - `dgemv_`, `dgemm_` and the `dfftw_*` entry points VASP imports are forwarded
+    unchanged to OpenBLAS and libfftw3, bit-identical and tested.
+  - With `VMB_PROFILE=1` (or a `PROFILE_DEFAULT=1` build) and `VMB_TELEMETRY=rank`,
+    they record calls, time and call site per shape, and FFTW plans against executes, into a per-rank
+    `rank-RRRRR.profile.json` (`vmb.rank-profile.v1`).
+  - `VMB_PROFILE=reuse` (`PROFILE_DEFAULT=2`) also probes DGEMV matrix reuse.
+  - The evidence aggregator binds each profile to its rank report.
+- **`VMB_DBLAS_LIBRARY=openblas|accelerate`** (build default
+  `DBLAS_ACCELERATE_DEFAULT`). It forwards `dgemv_` and `dgemm_` to Accelerate's
+  libBLAS instead of OpenBLAS, and leaves every other routine unchanged.
+  - Every rank report declares the library and image it resolved, and the aggregator
+    requires the ranks to agree.
+  - Default: OpenBLAS.
+- **`VMB_FFTW_PLAN_CACHE=0|1`** (build default `PLAN_CACHE_DEFAULT`). It keeps one FFTW
+  plan per repeated `FFTW_ESTIMATE` 3D problem and hands VASP a handle onto it.
+  - Rank reports declare the cache and its hit, miss and bypass counts.
+  - Tests compare cached results bit for bit with FFTW's own plans.
+  - Default: off. **Not measured on VASP**
+    ([#8](https://github.com/angzeli/vasp-metal-backend/issues/8)).
+- **`bench/blas_replay`.** It times observed DGEMV/DGEMM shapes on OpenBLAS or
+  Accelerate, warm or cold, against an exact reference.
+- **`compare_runs.py`:**
+  - `--fixed-work` compares single points capped at exactly NELM electronic steps.
+  - A new `CPU A/B consistent` class (exit 4) covers pairs where both runs are in off
+    mode, as in an A/B of a CPU-side setting.
+- **GPU wait split.** It is reported as queue, execution and wake-up time, from Metal's
+  GPU timestamps; `shape_replay` records both new phases.
+- **`vmb_shapes.py`** gains a profile census, and **`vmb_profile.py --callers`**
+  attributes sampled library time to the calling VASP routines.
+
+### Fixed
+
+- The evidence aggregator now reads profile files whole. They used to stop at the
+  64 KiB report limit, so every real VASP profile was judged malformed.
+- Caller attribution now skips the backend's own interposer frames.
+- The rank report object is rebuilt whenever its embedded identity changes.
+
+### Findings
+
+Anatase TiO2 at 8 ranks on the same MacBook Pro M3 Max as 0.4.
+- **Where the time goes (call timers, all ranks):**
+  - HSE06 (fixed at 2 electronic steps): DGEMV 40%, DGEMM 7.5%, FFTW execution 25%,
+    FFTW planning 6.1%.
+  - PBE: DGEMV 17%, FFTW execution 35%, FFTW planning 3.7%.
+  - FFTW plans every transform again: one plan per execute in both series.
+- **DGEMV/DGEMM on Accelerate (HSE06, fixed work):**
+  - Speed: **1.76× faster end to end** in two pairs run in opposite orders
+    (14,115 s against 8,024 s, and 14,517 s against 8,243 s); 1.46× per SCF step and
+    2.31× on the exact-exchange forces.
+  - Correctness: `CPU A/B consistent` in both pairs, with |dTOTEN|/N_atoms ≤ 7.5e-9 eV/atom and
+    identical forces and band edges at printed precision.
+  - The standalone replay, weighted by VASP's shape mix, predicts 1.70–1.75×.
+- **DGEMV/DGEMM on Accelerate (PBE single point):** 1.04× faster in three ABBA pairs
+  (40.2 s against 38.6 s), with identical TOTEN and forces. PBE's tall DGEMV gains
+  little.
+
+## 0.4.0 (tagged retroactively at the PR #6 merge, `80b438c`)
 
 A measurement release: whether realistic VASP workloads produce ZGEMM calls the
 GPU can win. Numerical policy, modes and the evidence contract are unchanged;
@@ -45,7 +112,7 @@ both, so `auto` stays empty.
     region, so no GPU run was made.
   - **Profile:** FFTW (38–41%) and the exchange DGEMV (29–32%) dominate.
 
-## 0.3.0 (merged, untagged)
+## 0.3.0 (tagged retroactively at the PR #2 merge, `8fba631`)
 
 Managed MPI execution and per-rank evidence. The architecture (a link-time
 `zgemm_` interposer) and the numerical policy are unchanged from 0.2, including

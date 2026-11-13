@@ -14,6 +14,8 @@
 #include <fcntl.h>
 #include <limits.h>
 #include <mach-o/dyld.h>
+#include <dlfcn.h>
+#include <mach/mach_time.h>
 #include <math.h>
 #include <stdarg.h>
 #include <stdlib.h>
@@ -32,6 +34,10 @@
 #define VMB_SOURCE_DIRTY 1
 #endif
 
+#ifndef VMB_PROFILE_DEFAULT
+#define VMB_PROFILE_DEFAULT 0  /* build-time default for VMB_PROFILE: 0, 1 or 2 (reuse) */
+#endif
+
 #define CONFIG_ERROR 78  /* EX_CONFIG */
 #define MAX_WORLD 4096
 
@@ -44,6 +50,28 @@ static struct {
 } rr = {.dir_fd = -1, .local_rank = -1, .local_size = -1};
 
 int vmb_rank_telemetry(void) { return rr.active && rr.telemetry; }
+
+/* Set once in the constructor, before the program runs; read on every call. */
+static int profile_level;
+
+int vmb_profile_level(void) { return profile_level; }
+
+const char *vmb_profile_level_name(int level)
+{
+    static const char *const names[3] = {"off", "profile", "reuse"};
+    return names[level];
+}
+
+static mach_timebase_info_data_t timebase;
+
+uint64_t vmb_ticks(void) { return mach_absolute_time(); }
+
+double vmb_ticks_to_s(uint64_t ticks)
+{
+    if (timebase.denom == 0)
+        mach_timebase_info(&timebase);
+    return (double)ticks * timebase.numer / timebase.denom * 1e-9;
+}
 
 static double wall_now(void)
 {
@@ -129,7 +157,7 @@ static int create_exclusive(const char *name)
     return openat(rr.dir_fd, name, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0600);
 }
 
-static void json_string(FILE *out, const char *s)
+void vmb_json_string(FILE *out, const char *s)
 {
     if (!s) {
         fputs("null", out);
@@ -145,6 +173,26 @@ static void json_string(FILE *out, const char *s)
             fputc(*p, out);
     }
     fputc('"', out);
+}
+
+void vmb_site_write_json(FILE *out, const void *addr)
+{
+    Dl_info info;
+    if (!addr || !dladdr(addr, &info) || !info.dli_fname) {
+        fputs("null", out);
+        return;
+    }
+    const char *base = strrchr(info.dli_fname, '/');
+    fprintf(out, "{\"image\": ");
+    vmb_json_string(out, base ? base + 1 : info.dli_fname);
+    fprintf(out, ", \"offset\": %llu, \"symbol\": ",
+            (unsigned long long)((const char *)addr - (const char *)info.dli_fbase));
+    vmb_json_string(out, info.dli_sname);
+    if (info.dli_sname && info.dli_saddr)
+        fprintf(out, ", \"symbol_offset\": %llu}",
+                (unsigned long long)((const char *)addr - (const char *)info.dli_saddr));
+    else
+        fprintf(out, ", \"symbol_offset\": null}");
 }
 
 /* Publish the stream written by fill() as NAME: temporary file, fsync, then a
@@ -176,7 +224,7 @@ static void write_claim(FILE *out, void *arg)
 {
     (void)arg;
     fprintf(out, "{\"schema\": \"vmb.rank-claim.v1\", \"attempt_id\": ");
-    json_string(out, rr.attempt);
+    vmb_json_string(out, rr.attempt);
     fprintf(out, ", \"rank\": %d, \"world_size\": %d, \"pid\": %d, \"start_unix\": %.6f}\n",
             rr.rank, rr.world, (int)rr.owner, rr.start);
 }
@@ -187,9 +235,23 @@ static void write_telemetry(FILE *out, void *arg)
 }
 
 struct report_args {
-    const char *telemetry_file;
+    const char *telemetry_file, *profile_file;
     uint64_t dropped;
 };
+
+static void write_profile(FILE *out, void *arg)
+{
+    (void)arg;
+    fprintf(out, "{\"schema\": \"vmb.rank-profile.v1\", \"complete\": true, \"attempt_id\": ");
+    vmb_json_string(out, rr.attempt);
+    fprintf(out, ", \"rank\": %d, \"world_size\": %d, \"pid\": %d, \"level\": \"%s\",\n",
+            rr.rank, rr.world, (int)getpid(), vmb_profile_level_name(profile_level));
+    fprintf(out, " \"blas\": ");
+    vmb_blas_write_json(out);
+    fprintf(out, ",\n \"fftw\": ");
+    vmb_fftw_write_json(out);
+    fprintf(out, "}\n");
+}
 
 static void write_report(FILE *out, void *arg)
 {
@@ -216,7 +278,7 @@ static void write_report(FILE *out, void *arg)
                  "\"source_commit\": \"%s\", \"source_digest\": \"%s\", \"source_dirty\": %s},\n",
             VMB_VERSION, VMB_SOURCE_COMMIT, VMB_SOURCE_DIGEST, VMB_SOURCE_DIRTY ? "true" : "false");
     fprintf(out, " \"attempt_id\": ");
-    json_string(out, rr.attempt);
+    vmb_json_string(out, rr.attempt);
     fprintf(out, ", \"rank\": %d, \"world_size\": %d, ", rr.rank, rr.world);
     if (rr.local_rank >= 0)
         fprintf(out, "\"local_rank\": %d, \"local_size\": %d, ", rr.local_rank, rr.local_size);
@@ -226,9 +288,9 @@ static void write_report(FILE *out, void *arg)
             getenv("OMPI_COMM_WORLD_RANK") ? "openmpi" : "singleton");
     fprintf(out, " \"process\": {\"pid\": %d, \"ppid\": %d, \"hostname\": ", (int)getpid(),
             (int)getppid());
-    json_string(out, host);
+    vmb_json_string(out, host);
     fprintf(out, ", \"executable\": ");
-    json_string(out, exe_path);
+    vmb_json_string(out, exe_path);
     if (have_stat)
         fprintf(out, ", \"executable_stat\": [%llu, %llu, %lld, %lld]},\n",
                 (unsigned long long)st.st_dev, (unsigned long long)st.st_ino,
@@ -240,9 +302,9 @@ static void write_report(FILE *out, void *arg)
     fprintf(out, " \"mode\": \"%s\", \"check\": %s,\n", vmb_mode_name(s.mode),
             s.check ? "true" : "false");
     fprintf(out, " \"device\": {\"initialized\": %s, \"name\": ", device ? "true" : "false");
-    json_string(out, device);
+    vmb_json_string(out, device);
     fprintf(out, "},\n \"cpu_library\": ");
-    json_string(out, s.cpu_library && *s.cpu_library ? s.cpu_library : NULL);
+    vmb_json_string(out, s.cpu_library && *s.cpu_library ? s.cpu_library : NULL);
     fprintf(out, ",\n \"counters\": {");
     for (int i = 0; i < VMB_STAT_REASON_BASE; i++)
         fprintf(out, "%s\"%s\": %llu", i ? ", " : "", counter_names[i],
@@ -265,6 +327,21 @@ static void write_report(FILE *out, void *arg)
     for (int i = 0; i < 16; i++)
         fprintf(out, "%s%llu", i ? ", " : "", (unsigned long long)s.work_decades[i]);
     fprintf(out, "],\n");
+    /* Optional profile declaration (v0.5): additive, absent from earlier reports. */
+    if (ra->profile_file)
+        fprintf(out, " \"profile\": {\"file\": \"%s\", \"level\": \"%s\"},\n",
+                ra->profile_file, vmb_profile_level_name(profile_level));
+    else if (profile_level != VMB_PROFILE_OFF)
+        fprintf(out, " \"profile\": {\"file\": null, \"level\": \"%s\"},\n",
+                vmb_profile_level_name(profile_level));
+    /* FFTW plan cache declaration (v0.5): additive; every v0.5 report has it. */
+    fprintf(out, " \"fftw_plan_cache\": ");
+    vmb_fftw_cache_write_json(out);
+    fprintf(out, ",\n");
+    /* DGEMV/DGEMM library declaration (v0.5): additive; every v0.5 report has it. */
+    fprintf(out, " \"dblas_library\": ");
+    vmb_dblas_write_json(out);
+    fprintf(out, ",\n");
     if (ra->telemetry_file)
         fprintf(out, " \"telemetry\": {\"file\": \"%s\", \"dropped_shapes\": %llu}}\n",
                 ra->telemetry_file, (unsigned long long)ra->dropped);
@@ -276,8 +353,15 @@ static void report_at_exit(void)
 {
     if (!rr.active || getpid() != rr.owner)
         return;  /* forked children never publish for the claiming process */
-    char name[64], telemetry[64];
-    struct report_args ra = {NULL, 0};
+    char name[64], telemetry[64], profile[64];
+    struct report_args ra = {NULL, NULL, 0};
+    if (profile_level != VMB_PROFILE_OFF) {
+        snprintf(profile, sizeof profile, "rank-%05d.profile.json", rr.rank);
+        if (publish(profile, write_profile, NULL) == 0)
+            ra.profile_file = profile;
+        else
+            fprintf(stderr, "vmb: rank %d profile not published (%s)\n", rr.rank, strerror(errno));
+    }
     if (rr.telemetry) {
         snprintf(telemetry, sizeof telemetry, "rank-%05d.telemetry.tsv", rr.rank);
         if (publish(telemetry, write_telemetry, &ra.dropped) == 0)
@@ -312,11 +396,14 @@ __attribute__((constructor)) static void rank_report_init(void)
 {
     const char *dir = getenv("VMB_REPORT_DIR"), *telemetry = getenv("VMB_TELEMETRY");
     const char *report = getenv("VMB_REPORT"), *attempt = getenv("VMB_ATTEMPT_ID");
-    if (!dir && !telemetry && !report && !attempt && !getenv("VMB_EXPECT_WORLD_SIZE"))
+    if (!dir && !telemetry && !report && !attempt && !getenv("VMB_EXPECT_WORLD_SIZE") &&
+        !getenv("VMB_PROFILE"))
         return;  /* no reporting requested: the launcher environment is not examined */
     int rank, world;
     read_rank(&rank, &world);
     if (!dir) {
+        if (getenv("VMB_PROFILE"))
+            fail("VMB_PROFILE requires VMB_REPORT_DIR and VMB_TELEMETRY=rank");
         if (attempt || getenv("VMB_EXPECT_WORLD_SIZE"))
             fail("VMB_ATTEMPT_ID/VMB_EXPECT_WORLD_SIZE require VMB_REPORT_DIR");
         if (telemetry && strcmp(telemetry, "rank") == 0)
@@ -340,6 +427,19 @@ __attribute__((constructor)) static void rank_report_init(void)
     rr.rank = rank;
     rr.world = world;
     rr.telemetry = telemetry != NULL;
+    const char *level = getenv("VMB_PROFILE");
+    if (level && !rr.telemetry)
+        fail("VMB_PROFILE requires VMB_TELEMETRY=rank");
+    if (!level)
+        profile_level = rr.telemetry ? VMB_PROFILE_DEFAULT : VMB_PROFILE_OFF;
+    else if (strcmp(level, "0") == 0)
+        profile_level = VMB_PROFILE_OFF;
+    else if (strcmp(level, "1") == 0)
+        profile_level = VMB_PROFILE_ON;
+    else if (strcmp(level, "reuse") == 0)
+        profile_level = VMB_PROFILE_REUSE;
+    else
+        fail("VMB_PROFILE must be 0, 1 or reuse");
     rr.owner = getpid();
     rr.start = wall_now();
     char claim[64];

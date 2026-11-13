@@ -111,6 +111,42 @@ class CensusTest(unittest.TestCase):
         with self.assertRaises(shapes.CensusError):
             shapes.census(self.run, [shapes.DEFAULT_REGION])
 
+    def test_profile_census_from_real_profile_files(self):
+        world, reports = 2, self.run / 'vmb-reports'
+        for rank in range(world):
+            env = {k: v for k, v in os.environ.items() if not k.startswith(('VMB_', 'OMPI_', 'PMIX_'))}
+            env.update(VMB_MODE='off', VMB_REPORT_DIR=str(reports), VMB_ATTEMPT_ID='prof',
+                       VMB_TELEMETRY='rank', VMB_PROFILE='reuse', OMPI_COMM_WORLD_RANK=str(rank),
+                       OMPI_COMM_WORLD_SIZE=str(world), OMP_NUM_THREADS='1', OPENBLAS_NUM_THREADS='1')
+            subprocess.run([str(ROOT / 'build/test_blas_fftw')], env=env, check=True,
+                           stdout=subprocess.DEVNULL, timeout=60)
+        (self.run / 'vmb-evidence.json').write_text(json.dumps(evidence.aggregate(reports, 'prof', world)))
+        (self.run / 'RUN_METADATA.txt').write_text('elapsed_s: 4.0\n')
+        result = shapes.profile(self.run)
+        self.assertTrue(result['reconciliation']['agrees'])
+        self.assertEqual((result['level'], result['ranks']), ('reuse', [0, 1]))
+        ops = result['blas']['ops']
+        self.assertEqual((ops['dgemv']['calls'], ops['dgemm']['calls']), (14, 6))
+        self.assertAlmostEqual(ops['dgemv']['share_of_rank_time'], ops['dgemv']['rank_seconds'] / 8.0)
+        self.assertEqual(len(ops['dgemv']['per_rank_seconds']), 2)
+        self.assertEqual({s['site'].split('+')[0] for s in result['blas']['sites']},
+                         {'call_dgemv', 'gemm_case'})
+        # One call site, three 3D problems (out of place and in place ESTIMATE, one
+        # MEASURE); the out-of-place one is planned six times per rank.
+        dft_3d = [s for s in result['fftw']['shapes'] if s['kind'] == 'dft_3d']
+        self.assertEqual(len(dft_3d), 3)
+        (repeated,) = [s for s in dft_3d if s['flags'] == 64 and not s['inplace']]
+        self.assertEqual((repeated['plans'], repeated['executes'], repeated['ranks']), (12, 18, 2))
+        self.assertEqual(result['fftw']['totals']['plans'], 22)
+        (site,) = result['reuse']['sites']
+        self.assertEqual((site['calls'], site['same_content'], site['runs'][:3]), (14, 6, [4, 2, 2]))
+        # A profile file with the wrong rank is rejected, not silently merged.
+        doc = json.loads((reports / 'rank-00001.profile.json').read_text())
+        doc['rank'] = 0
+        (reports / 'rank-00001.profile.json').write_text(json.dumps(doc))
+        with self.assertRaises(shapes.CensusError):
+            shapes.profile(self.run)
+
     def test_region_parsing(self):
         self.assertEqual(shapes.parse_region('mn=16384,mnk=1.5e7'), {'mn': 16384.0, 'mnk': 1.5e7})
         for text in ('mn>=1', 'q=1', 'mn=abc'):

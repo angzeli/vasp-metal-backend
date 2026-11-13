@@ -26,6 +26,7 @@ struct vmb_gpu_job {
     double *out;                 /* dense m x n, interleaved (re, im) */
     /* Filled by vmb_gpu_zgemm, seconds. */
     double t_pack, t_encode, t_gpu, t_wait, t_unpack;
+    double t_queue, t_wake;      /* commit -> GPU start, GPU end -> wake-up */
 };
 
 /* Lazily creates device, kernel and queue; returns 1 when usable. */
@@ -69,5 +70,33 @@ const char *vmb_status_name(int status);
 /* Per-rank report route (VMB_REPORT_DIR, docs/CONTRACT-v0.3.md). Configured in a
    library constructor; 1 when per-rank telemetry is to be recorded. */
 int vmb_rank_telemetry(void);
+
+/* Exported SYMBOL from the first loaded image whose basename starts with
+   IMAGE_PREFIX, or NULL. SELF (our own definition) is never returned, so an
+   interposer cannot resolve to itself. The image path is copied to IMAGE. */
+void *vmb_find_symbol(const char *image_prefix, const char *symbol, const void *self,
+                      char *image, size_t image_size);
+
+/* v0.5 profiling of DGEMV, DGEMM and FFTW (rank-RRRRR.profile.json). Active only
+   on the per-rank telemetry route. 0 off, 1 profile, 2 profile plus the private
+   DGEMV reuse probe. */
+enum { VMB_PROFILE_OFF, VMB_PROFILE_ON, VMB_PROFILE_REUSE };
+int vmb_profile_level(void);
+const char *vmb_profile_level_name(int level);
+uint64_t vmb_ticks(void);        /* mach_absolute_time */
+double vmb_ticks_to_s(uint64_t ticks);
+/* JSON description of a return address: image basename, image-relative
+   offset and the nearest exported symbol. The address itself is not written. */
+void vmb_site_write_json(FILE *out, const void *addr);
+void vmb_json_string(FILE *out, const char *s);
+/* Profile sections; each writes one JSON object and returns its dropped count. */
+uint64_t vmb_blas_write_json(FILE *out);
+uint64_t vmb_fftw_write_json(FILE *out);
+/* v0.5 opt-in FFTW plan cache (VMB_FFTW_PLAN_CACHE, build default
+   PLAN_CACHE_DEFAULT): its report section, written whether it is on or off. */
+void vmb_fftw_cache_write_json(FILE *out);
+/* v0.5 opt-in DGEMV/DGEMM library (VMB_DBLAS_LIBRARY, build default
+   DBLAS_ACCELERATE_DEFAULT): its report section, written whichever is used. */
+void vmb_dblas_write_json(FILE *out);
 
 #endif

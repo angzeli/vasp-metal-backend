@@ -162,7 +162,7 @@ class RankReportTest(unittest.TestCase):
         report = self.dir.parent / 'legacy.txt'
         code, err = self.single(base_env(VMB_MODE='off', VMB_REPORT=report), calls='all')
         self.assertEqual(code, 0, err)
-        self.assertIn('vmb.version=0.4', report.read_text())  # single-process route unchanged
+        self.assertIn('vmb.version=0.5', report.read_text())  # single-process route unchanged
         code, err = self.single(base_env(VMB_REPORT=report, OMPI_COMM_WORLD_RANK='0',
                                          OMPI_COMM_WORLD_SIZE='2'))
         self.assertEqual(code, CONFIG_ERROR, err)
