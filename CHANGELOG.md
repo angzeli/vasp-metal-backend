@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.5.0 (unreleased)
+## 0.5.0 (2026-11-13)
 
 v0.4 showed that ZGEMM is not where TiO2's time goes. This release times DGEMV,
 DGEMM and FFTW instead, and adds two opt-in CPU-side routes. The numerical policy,
@@ -67,7 +67,7 @@ Anatase TiO2 at 8 ranks on the same MacBook Pro M3 Max as 0.4.
   (40.2 s against 38.6 s), with identical TOTEN and forces. PBE's tall DGEMV gains
   little.
 
-## 0.4.0 (merged, untagged)
+## 0.4.0 (tagged retroactively at the PR #6 merge, `80b438c`)
 
 A measurement release: whether realistic VASP workloads produce ZGEMM calls the
 GPU can win. Numerical policy, modes and the evidence contract are unchanged;
@@ -112,7 +112,7 @@ both, so `auto` stays empty.
     region, so no GPU run was made.
   - **Profile:** FFTW (38–41%) and the exchange DGEMV (29–32%) dominate.
 
-## 0.3.0 (merged, untagged)
+## 0.3.0 (tagged retroactively at the PR #2 merge, `8fba631`)
 
 Managed MPI execution and per-rank evidence. The architecture (a link-time
 `zgemm_` interposer) and the numerical policy are unchanged from 0.2, including

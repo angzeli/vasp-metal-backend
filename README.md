@@ -15,7 +15,7 @@ profile them and to offer two opt-in CPU-side routes.
 
 ## Status
 
-| | v0.1 (`d3be811`) | v0.2 (final safety fix `afb272e`) | v0.3 (merged, untagged) | v0.4 (merged, untagged) | v0.5 (unreleased) |
+| | v0.1 (`d3be811`) | v0.2 (final safety fix `afb272e`) | v0.3 (`v0.3.0`) | v0.4 (`v0.4.0`) | v0.5 (`v0.5.0`) |
 | --- | --- | --- | --- | --- | --- |
 | Standalone correctness | verified | **passed** at `afb272e`: 138 C cases, 12 Fortran ABI calls, 15 run-comparison cases | numerical gates unchanged and passing; per-rank report and aggregation tests added | numerical gates unchanged and passing; census, profile and relaxation-comparison tests added | numerical gates unchanged; forwarding, profiling, plan-cache, Accelerate-route and fixed-work comparison tests added |
 | Private relink | verified | verified (link only, `0344fdb` build) | link-only relink on the Mac mini with the port's toolchain convention | link-only relink on the MacBook (M3 Max) | link-only relink on the MacBook (M3 Max) |
