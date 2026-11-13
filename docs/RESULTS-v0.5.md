@@ -209,3 +209,6 @@ The cache (`VMB_FFTW_PLAN_CACHE=1`, commit `dc394d6`) reuses repeated FFTW_ESTIM
    making Accelerate the default for DGEMV/DGEMM.
 3. **FFTW execution** (25–35% of rank time) is now the largest library target.
 4. **Larger systems** (the Co3O4 case), where shapes and shares may differ.
+5. **Baseline:** VASP linked directly against Accelerate
+   ([#9](https://github.com/angzeli/vasp-metal-backend/issues/9)), to place the
+   interposer route's gain.
