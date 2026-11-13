@@ -13,8 +13,8 @@ regions, and every default build behaves as 0.4. Results:
 - **DGEMV, DGEMM and FFTW profiling behind the interposer.**
   - `dgemv_`, `dgemm_` and the `dfftw_*` entry points VASP imports are forwarded
     unchanged to OpenBLAS and libfftw3, bit-identical and tested.
-  - With `VMB_PROFILE=1` (or a `PROFILE_DEFAULT=1` build), they record calls, time and
-    call site per shape, and FFTW plans against executes, into a per-rank
+  - With `VMB_PROFILE=1` (or a `PROFILE_DEFAULT=1` build) and `VMB_TELEMETRY=rank`,
+    they record calls, time and call site per shape, and FFTW plans against executes, into a per-rank
     `rank-RRRRR.profile.json` (`vmb.rank-profile.v1`).
   - `VMB_PROFILE=reuse` (`PROFILE_DEFAULT=2`) also probes DGEMV matrix reuse.
   - The evidence aggregator binds each profile to its rank report.

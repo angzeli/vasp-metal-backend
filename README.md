@@ -84,8 +84,9 @@ cache (`VMB_FFTW_PLAN_CACHE`, not yet measured on VASP). Results are in
   - With HSE06, ZGEMM is 0.008% of rank time.
   - FFTW is 38–41% of busy time in both series, and the HSE06 exchange DGEMV 29–32%.
 - **The CPU libraries are the lever (v0.5).** Call timers on all ranks give:
-  - HSE06 (fixed work): DGEMV 40%, DGEMM 7.5%, FFTW 31% (6.1% of it planning).
-  - PBE: DGEMV 17%, FFTW 38%.
+  - HSE06 (fixed work): DGEMV 40%, DGEMM 7.5%, FFTW 31% (25% execution, 6.1%
+    planning).
+  - PBE: DGEMV 17%, FFTW 38% (35% execution, 3.5–3.7% planning).
   - Routing DGEMV/DGEMM to Accelerate makes the HSE06 case 1.76× faster end to end,
     with results within OpenBLAS's own run-to-run spread. It stays opt-in.
 - Details: [docs/RESULTS-v0.1.md](docs/RESULTS-v0.1.md),
@@ -185,7 +186,7 @@ group, no retries.
 | `VMB_REPORT_DIR` | none | v0.3 per-rank route: private directory receiving one claim and one report per rank |
 | `VMB_ATTEMPT_ID` | none | required with `VMB_REPORT_DIR`; binds every report to one attempt |
 | `VMB_EXPECT_WORLD_SIZE` | none | optional; must equal the launcher's world size |
-| `VMB_PROFILE` | `0` | v0.5: `1` times DGEMV, DGEMM and FFTW per shape into `rank-RRRRR.profile.json`; `reuse` adds the DGEMV reuse probe. Build default `PROFILE_DEFAULT` |
+| `VMB_PROFILE` | `0` | v0.5: `1` times DGEMV, DGEMM and FFTW per shape into `rank-RRRRR.profile.json`; `reuse` adds the DGEMV reuse probe. Needs `VMB_TELEMETRY=rank`. Build default `PROFILE_DEFAULT` |
 | `VMB_DBLAS_LIBRARY` | `openblas` | v0.5: `accelerate` sends `dgemv_` and `dgemm_` to Accelerate (results may differ in the last bits). Build default `DBLAS_ACCELERATE_DEFAULT` |
 | `VMB_FFTW_PLAN_CACHE` | `0` | v0.5: `1` reuses repeated FFTW_ESTIMATE 3D plans (not yet measured on VASP). Build default `PLAN_CACHE_DEFAULT` |
 | `VMB_MIN_WORK` | 0 | minimum m·n·k sent to the GPU |
@@ -196,7 +197,8 @@ group, no retries.
 ## Standalone results (Apple M3 Max)
 
 - `build/test_zgemm`: 138 cases.
-- `build/test_fortran_abi`: 12 calls, against a quad-precision oracle.
+- `build/test_fortran_abi`: 12 ZGEMM calls against a quad-precision oracle, plus
+  DGEMV/DGEMM forwarding through the Fortran ABI (v0.5).
 - `tests/test_rank_reports.py`: 16 cases (per-rank route, aggregation and v0.4
   timing fields).
 - `build/test_blas_fftw`: DGEMV/DGEMM/FFTW forwarding, profiling, plan cache and
