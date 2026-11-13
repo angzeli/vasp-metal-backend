@@ -63,7 +63,9 @@ Anatase TiO2 at 8 ranks on the same MacBook Pro M3 Max as 0.4.
   - Correctness: `CPU A/B consistent` in both pairs, with |dTOTEN|/N_atoms ≤ 7.5e-9 eV/atom and
     identical forces and band edges at printed precision.
   - The standalone replay, weighted by VASP's shape mix, predicts 1.70–1.75×.
-  - A PBE A/B is pending.
+- **DGEMV/DGEMM on Accelerate (PBE single point):** 1.04× faster in three ABBA pairs
+  (40.2 s against 38.6 s), with identical TOTEN and forces. PBE's tall DGEMV gains
+  little.
 
 ## 0.4.0 (merged, untagged)
 

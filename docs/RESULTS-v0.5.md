@@ -11,14 +11,14 @@ v0.4 (anatase TiO2, MacBook Pro M3 Max).
 | DGEMV + DGEMM share of rank time (call timers, all 8 ranks) | **17%** (DGEMM < 0.1%) | **48%** (DGEMV 40%, DGEMM 7.5%) |
 | FFTW share: planning + execution | 3.5–3.7% + 35% | 6.1% + 25% |
 | FFTW plans per execute | 1.00 (every transform is planned again) | 1.00 |
-| End to end, DGEMV/DGEMM on Accelerate against OpenBLAS | not yet measured (pending, §8) | **1.76× faster** in both pairs, run in opposite orders |
-| Results agree? | n/a | **Yes.** `CPU A/B consistent`: \|dTOTEN\|/N_atoms 7.5e-9 eV/atom, forces and band edges identical at printed precision |
+| End to end, DGEMV/DGEMM on Accelerate against OpenBLAS | **1.04× faster** (single point, 3 ABBA pairs) | **1.76× faster** in both pairs, run in opposite orders |
+| Results agree? | **Yes.** `CPU A/B consistent`: same TOTEN, forces and SCF step count; stress within 1e-5 kB | **Yes.** `CPU A/B consistent`: \|dTOTEN\|/N_atoms 7.5e-9 eV/atom, forces and band edges identical at printed precision |
 
 **Decisions.**
 - **The Accelerate route ships opt-in** (`VMB_DBLAS_LIBRARY=accelerate`, or a
   binary built with `DBLAS_ACCELERATE_DEFAULT=1`). The default stays OpenBLAS:
-  Accelerate's results differ from OpenBLAS's in the last bits. The speedup was
-  measured on one system, and with HSE06 only.
+  Accelerate's results differ from OpenBLAS's in the last bits. The gain depends on
+  the DGEMV share and shapes: 1.76× for HSE06, 1.04× for PBE, on one system.
 - **The FFTW plan cache ships opt-in and unmeasured on VASP.** Its upper bound is
   6.1% of HSE06 rank time and 3.7% of PBE rank time (§3). Measuring it is v0.6
   ([#8](https://github.com/angzeli/vasp-metal-backend/issues/8)).
@@ -52,9 +52,9 @@ records the DGEMV/DGEMM library actually resolved, and each A/B launch checked i
 
 | Case | Settings | Launches (all exit 0, COMPLETE per-rank evidence, 8 ranks, NCORE 1, KPAR 1) |
 | --- | --- | --- |
-| `tio2-pbe-sp` | v0.4 PBE single point | A1–A3 profile, alternated with A4–A6 off; A7 reuse probe; A9 profile with `sample` |
+| `tio2-pbe-sp` | v0.4 PBE single point | A1–A3 profile, alternated with A4–A6 off; A7 reuse probe; A9 profile with `sample`; P1–P6 OpenBLAS/Accelerate ABBA (phase H) |
 | `tio2-pbe` | v0.4 PBE relaxation, ISIF = 3 | A8 profile (11 ionic steps) |
-| `tio2-hse06-fw` | v0.4 HSE06 single point with NELMIN = NELM = 2, restarted from the v0.4 HSE06 WAVECAR | H1 profile with `sample`, H2 off (phase A); H7 OpenBLAS, H8 Accelerate (phase F); H9 Accelerate, H10 OpenBLAS (phase G, pending) |
+| `tio2-hse06-fw` | v0.4 HSE06 single point with NELMIN = NELM = 2, restarted from the v0.4 HSE06 WAVECAR | H1 profile with `sample`, H2 off (phase A); H7 OpenBLAS, H8 Accelerate (phase F); H9 Accelerate, H10 OpenBLAS (phase G) |
 | `si2` | 1 rank, smoke test | S1 OpenBLAS, S2 Accelerate: same TOTEN, each declaring its library |
 
 **Why fixed work.** A converged HSE06 single point took 13.5 h in v0.4. Capping it at
@@ -130,7 +130,9 @@ host (by `run_bench.py`'s rule). Medians per call, in µs, for the five largest 
 - **Under 8-way contention**, the gain falls to 2.1× on the same weighting: eight
   copies of pure BLAS share each cluster's matrix units, and OpenBLAS barely notices.
 
-## 5. End to end: DGEMV/DGEMM on Accelerate (HSE06, fixed work)
+## 5. End to end: DGEMV/DGEMM on Accelerate
+
+### HSE06, fixed work
 
 | Run | Library | Order | SCF step 1 | SCF step 2 | Post-SCF (forces) | Total |
 | --- | --- | --- | --- | --- | --- | --- |
@@ -163,6 +165,32 @@ host (by `run_bench.py`'s rule). Medians per call, in µs, for the five largest 
   H7, as H9 is 2.7% slower than H8. Both libraries slow down alike, so pair 2's ratio
   matches pair 1's.
 
+### PBE single point
+
+Three pairs in ABBA order (P1–P6: OpenBLAS, Accelerate, Accelerate, OpenBLAS,
+OpenBLAS, Accelerate), on the v05f binaries, run back to back.
+
+| Pair | OpenBLAS | Accelerate | Ratio |
+| --- | --- | --- | --- |
+| P1 / P2 | 40.18 s | 38.59 s | 1.041× |
+| P4 / P3 | 40.38 s | 38.62 s | 1.046× |
+| P5 / P6 | 40.07 s | 38.60 s | 1.038× |
+| Mean | 40.21 s | 38.60 s | **1.042×** |
+
+- **4% faster, well outside the spread.** OpenBLAS runs span 0.8%, Accelerate runs
+  0.07%.
+- **Correctness.** All three pairs are `CPU A/B consistent`: identical TOTEN
+  (−107.30644851 eV), forces at printed precision, 16 SCF steps each, stress within
+  1e-5 kB.
+- **Far below the cap.** DGEMV is 17% of PBE rank time, so a 1.2× gain was possible.
+  1.04× implies Accelerate is only about 1.3× faster on PBE's DGEMV, against 8.3×
+  on HSE06's. The likely reason is shape: PBE's calls are tall (about 4,700 × 8 to
+  18, §3), HSE06's short (324 × 9 to 25). No PBE shapes were replayed, so this is
+  not measured.
+- **The P runs are 13% faster than A4–A6** (40.2 s against 46.0 s). A4–A6 used the
+  v05b binaries and started with the host at load 8–10. Only the same-session pairs
+  are compared here.
+
 ## 6. Cross-checks
 
 | Check | Expected | Observed | Holds? |
@@ -170,6 +198,7 @@ host (by `run_bench.py`'s rule). Medians per call, in µs, for the five largest 
 | Replay predicts the end-to-end gain | 1.75× (warm), 1.70× (cold) | 1.77× (H8 against mean of H2, H7) | **Yes** |
 | … per phase (Amdahl, 8.3× BLAS, sampled shares) | SCF 1.51×, forces 2.47× | 1.46×, 2.31× | Yes, slightly below |
 | 8-process replay predicts it | 1.33× | 1.77× | No: a pessimistic bound (§4) |
+| PBE gain within the Amdahl cap (DGEMV 17%) | ≤ 1.2× | 1.04× | Yes; implies about 1.3× on PBE's BLAS |
 | Order does not matter (ABBA) | | OpenBLAS first 1.759×, Accelerate first 1.761× | Yes |
 | OpenBLAS baseline reproduces | | H2 14,288 s, H7 14,115 s (1.2% apart, different commits) | Yes |
 | Profiling overhead | small | PBE: profile 45.3 s vs off 46.0 s (within spread); HSE06: H1 +0.9% over H2, +2.1% over H7 | Yes, ≤ 2% |
@@ -188,9 +217,7 @@ The cache (`VMB_FFTW_PLAN_CACHE=1`, commit `dc394d6`) reuses repeated FFTW_ESTIM
 
 ## 8. Pending
 
-- **PBE A/B.** DGEMV is 17% of PBE rank time, so the gain is capped at 1.2×. The
-  replay can't predict it, because it covers none of PBE's shapes. Three ABBA pairs
-  on the PBE single point (about 45 s each) would settle it.
+- **8-process replay (r3-p8).** Rerun of the exploratory series in §4.
 
 ## Limitations
 
@@ -210,8 +237,9 @@ The cache (`VMB_FFTW_PLAN_CACHE=1`, commit `dc394d6`) reuses repeated FFTW_ESTIM
 
 1. **FFTW plan cache** ([#8](https://github.com/angzeli/vasp-metal-backend/issues/8)):
    measure it, with a ceiling of 6.1% (HSE06) and 3.7% (PBE).
-2. **Accelerate route:** the PBE A/B and a converged HSE06 run. If both hold, consider
-   making Accelerate the default for DGEMV/DGEMM.
+2. **Accelerate route:** a converged HSE06 run. If it holds, consider making
+   Accelerate the default for DGEMV/DGEMM; PBE gains little (1.04×) but loses
+   nothing.
 3. **FFTW execution** (25–35% of rank time) is now the largest library target.
 4. **Larger systems** (the Co3O4 case), where shapes and shares may differ.
 5. **Baseline:** VASP linked directly against Accelerate
