@@ -11,7 +11,7 @@ v0.4 (anatase TiO2, MacBook Pro M3 Max).
 | DGEMV + DGEMM share of rank time (call timers, all 8 ranks) | **17%** (DGEMM < 0.1%) | **48%** (DGEMV 40%, DGEMM 7.5%) |
 | FFTW share: planning + execution | 3.5–3.7% + 35% | 6.1% + 25% |
 | FFTW plans per execute | 1.00 (every transform is planned again) | 1.00 |
-| End to end, DGEMV/DGEMM on Accelerate against OpenBLAS | not yet measured (pending, §8) | **1.76× faster** (pair 1); pair 2 pending |
+| End to end, DGEMV/DGEMM on Accelerate against OpenBLAS | not yet measured (pending, §8) | **1.76× faster** in both pairs, run in opposite orders |
 | Results agree? | n/a | **Yes.** `CPU A/B consistent`: \|dTOTEN\|/N_atoms 7.5e-9 eV/atom, forces and band edges identical at printed precision |
 
 **Decisions.**
@@ -138,15 +138,19 @@ host (by `run_bench.py`'s rule). Medians per call, in µs, for the five largest 
 | H7 | OpenBLAS | 1st | 3,830 s | 3,826 s | 6,456 s | 14,115 s |
 | H8 | Accelerate | 2nd | 2,620 s | 2,611 s | 2,790 s | **8,024 s** |
 | H9 | Accelerate | 1st | 2,689 s | 2,696 s | 2,855 s | **8,243 s** |
-| H10 | OpenBLAS | 2nd | running | | | |
+| H10 | OpenBLAS | 2nd | 3,914 s | 3,985 s | 6,615 s | 14,517 s |
 
-- **Pair 1: 1.76× faster end to end.** 1.46× per SCF step, and 2.31× on the post-SCF
-  exact-exchange forces, the more DGEMV-bound phase (§3).
-- **Correctness.** `compare_runs.py --fixed-work` classes H7/H8 `CPU A/B consistent`:
-  - |dTOTEN|/N_atoms = 7.5e-9 eV/atom, against a 1e-5 threshold;
+- **1.76× faster end to end, in both orders.** Pair 1 (OpenBLAS first, H7/H8) gives
+  1.759×, pair 2 (Accelerate first, H10/H9) 1.761×; pooled, 1.760×. Per SCF step
+  1.46× and 1.46–1.48×; on the post-SCF exact-exchange forces, the more DGEMV-bound
+  phase (§3), 2.31× and 2.32×.
+- **Correctness.** `compare_runs.py --fixed-work` classes both pairs `CPU A/B
+  consistent`:
+  - |dTOTEN|/N_atoms = 7.5e-9 (H7/H8) and 5.0e-9 eV/atom (H10/H9), against a 1e-5
+    threshold;
   - forces identical at printed precision;
-  - VBM 0.8697 eV, CBM 4.4227 eV and gap 3.5530 eV in all four HSE06 runs (H1, H2,
-    H7, H8). The gap matches v0.4's converged 3.55 eV.
+  - VBM 0.8697 eV, CBM 4.4227 eV and gap 3.5530 eV in all six HSE06 runs (H1, H2,
+    H7–H10). The gap matches v0.4's converged 3.55 eV.
 - **The OpenBLAS runs differ among themselves by as much.** TOTEN across H1, H2 and
   H7 spans 6e-8 eV, and H8 differs from H7 by 9e-8 eV.
 - **H9 repeats H8.** Run first this time, it is 2.7% slower than H8 (8,243 s against
@@ -154,8 +158,10 @@ host (by `run_bench.py`'s rule). Medians per call, in µs, for the five largest 
   OpenBLAS runs, are 1.2% apart. H9 ran in the daytime with the desktop in use; H7
   and H8 ran overnight. Against H8, H9 is also `CPU A/B consistent`
   (|dTOTEN|/N_atoms 4.2e-9 eV/atom, forces and band edges identical), so Accelerate
-  runs differ among themselves by about as much as OpenBLAS runs. The pair-2 ratio
-  is H10 against H9, from the same part of the day.
+  runs differ among themselves by about as much as OpenBLAS runs.
+- **The daytime slowdown cancels.** H10, also run in the daytime, is 2.8% slower than
+  H7, as H9 is 2.7% slower than H8. Both libraries slow down alike, so pair 2's ratio
+  matches pair 1's.
 
 ## 6. Cross-checks
 
@@ -164,6 +170,7 @@ host (by `run_bench.py`'s rule). Medians per call, in µs, for the five largest 
 | Replay predicts the end-to-end gain | 1.75× (warm), 1.70× (cold) | 1.77× (H8 against mean of H2, H7) | **Yes** |
 | … per phase (Amdahl, 8.3× BLAS, sampled shares) | SCF 1.51×, forces 2.47× | 1.46×, 2.31× | Yes, slightly below |
 | 8-process replay predicts it | 1.33× | 1.77× | No: a pessimistic bound (§4) |
+| Order does not matter (ABBA) | | OpenBLAS first 1.759×, Accelerate first 1.761× | Yes |
 | OpenBLAS baseline reproduces | | H2 14,288 s, H7 14,115 s (1.2% apart, different commits) | Yes |
 | Profiling overhead | small | PBE: profile 45.3 s vs off 46.0 s (within spread); HSE06: H1 +0.9% over H2, +2.1% over H7 | Yes, ≤ 2% |
 | Sampled and timed shares agree (HSE06) | | DGEMV 44% sampled (phase-weighted), 40% timed | Yes |
@@ -181,8 +188,6 @@ The cache (`VMB_FFTW_PLAN_CACHE=1`, commit `dc394d6`) reuses repeated FFTW_ESTIM
 
 ## 8. Pending
 
-- **Phase G (H9, H10).** The same HSE06 pair in reverse order, Accelerate first, to
-  rule out an order or drift effect. H9 is done (§5); H10 is running.
 - **PBE A/B.** DGEMV is 17% of PBE rank time, so the gain is capped at 1.2×. The
   replay can't predict it, because it covers none of PBE's shapes. Three ABBA pairs
   on the PBE single point (about 45 s each) would settle it.
@@ -191,7 +196,7 @@ The cache (`VMB_FFTW_PLAN_CACHE=1`, commit `dc394d6`) reuses repeated FFTW_ESTIM
 
 - **Scope:** one system on one host. 8 ranks, NCORE 1, KPAR 1, LREAL .FALSE.
 - **HSE06 fixed work, not a converged run.** The speedup is per unit of work at a
-  fixed point, from one pair so far (a second is running). A converged HSE06 run on
+  fixed point, from two pairs in opposite orders. A converged HSE06 run on
   Accelerate was not made.
 - **Accelerate is a different BLAS.** Its results differ from OpenBLAS's in the last
   bits. They stay within the run-to-run spread of OpenBLAS here, but other systems

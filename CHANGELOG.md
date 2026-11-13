@@ -57,12 +57,13 @@ Anatase TiO2 at 8 ranks on the same MacBook Pro M3 Max as 0.4.
   - PBE: DGEMV 17%, FFTW execution 35%, FFTW planning 3.7%.
   - FFTW plans every transform again: one plan per execute in both series.
 - **DGEMV/DGEMM on Accelerate (HSE06, fixed work):**
-  - Speed: **1.76× faster end to end** (14,115 s against 8,024 s); 1.46× per SCF step
-    and 2.31× on the exact-exchange forces.
-  - Correctness: `CPU A/B consistent`, with |dTOTEN|/N_atoms 7.5e-9 eV/atom and
+  - Speed: **1.76× faster end to end** in two pairs run in opposite orders
+    (14,115 s against 8,024 s, and 14,517 s against 8,243 s); 1.46× per SCF step and
+    2.31× on the exact-exchange forces.
+  - Correctness: `CPU A/B consistent` in both pairs, with |dTOTEN|/N_atoms ≤ 7.5e-9 eV/atom and
     identical forces and band edges at printed precision.
   - The standalone replay, weighted by VASP's shape mix, predicts 1.70–1.75×.
-  - A reverse-order pair and a PBE A/B are pending.
+  - A PBE A/B is pending.
 
 ## 0.4.0 (merged, untagged)
 

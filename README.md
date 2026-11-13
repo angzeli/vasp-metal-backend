@@ -20,7 +20,7 @@ profile them and to offer two opt-in CPU-side routes.
 | Standalone correctness | verified | **passed** at `afb272e`: 138 C cases, 12 Fortran ABI calls, 15 run-comparison cases | numerical gates unchanged and passing; per-rank report and aggregation tests added | numerical gates unchanged and passing; census, profile and relaxation-comparison tests added | numerical gates unchanged; forwarding, profiling, plan-cache, Accelerate-route and fixed-work comparison tests added |
 | Private relink | verified | verified (link only, `0344fdb` build) | link-only relink on the Mac mini with the port's toolchain convention | link-only relink on the MacBook (M3 Max) | link-only relink on the MacBook (M3 Max) |
 | VASP integration | **verified** on Si2: 802/802 GPU results consumed, same TOTEN | **verified on the earlier `0344fdb` build** (Si2: 802/802 consumed, 0 shadow failures, 0 range fallbacks, same TOTEN); **`afb272e` not VASP-tested** | 16-rank managed qualification: see [docs/RESULTS-v0.3.md](docs/RESULTS-v0.3.md) | TiO2 at 8 ranks, two series: PBE relaxation and single point with forced GPU results VASP-verified (4.9M and 1.0M calls, 0 shadow failures); HSE06 single point measured on the CPU only: see [docs/RESULTS-v0.4.md](docs/RESULTS-v0.4.md) | TiO2 at 8 ranks: DGEMV/DGEMM on Accelerate `CPU A/B consistent` with OpenBLAS on the HSE06 fixed-work case (\|dTOTEN\|/N_atoms 7.5e-9 eV/atom): see [docs/RESULTS-v0.5.md](docs/RESULTS-v0.5.md) |
-| VASP performance acceleration | not established | **not established**; synthetic benchmarks exploratory only (busy host) | **not established** | **not established**: no TiO2 ZGEMM call reaches the GPU-win region; forcing ZGEMM onto the GPU is 2.6× slower end to end with PBE, and ZGEMM is 0.008% of rank time with HSE06 | **CPU-side only, opt-in**: DGEMV/DGEMM on Accelerate is 1.76× faster end to end on the TiO2 HSE06 fixed-work case (one pair; reverse-order pair and PBE pending). No GPU speedup |
+| VASP performance acceleration | not established | **not established**; synthetic benchmarks exploratory only (busy host) | **not established** | **not established**: no TiO2 ZGEMM call reaches the GPU-win region; forcing ZGEMM onto the GPU is 2.6× slower end to end with PBE, and ZGEMM is 0.008% of rank time with HSE06 | **CPU-side only, opt-in**: DGEMV/DGEMM on Accelerate is 1.76× faster end to end on the TiO2 HSE06 fixed-work case (two pairs in opposite orders; PBE pending). No GPU speedup |
 
 **Companion repositories.** Relinking and managed runs use the VASP port
 [angzeli/vasp-6.6.1-macos-arm64-port](https://github.com/angzeli/vasp-6.6.1-macos-arm64-port)
@@ -87,7 +87,8 @@ cache (`VMB_FFTW_PLAN_CACHE`, not yet measured on VASP). Results are in
   - HSE06 (fixed work): DGEMV 40%, DGEMM 7.5%, FFTW 31% (25% execution, 6.1%
     planning).
   - PBE: DGEMV 17%, FFTW 38% (35% execution, 3.5–3.7% planning).
-  - Routing DGEMV/DGEMM to Accelerate makes the HSE06 case 1.76× faster end to end,
+  - Routing DGEMV/DGEMM to Accelerate makes the HSE06 case 1.76× faster end to end
+    in both run orders,
     with results within OpenBLAS's own run-to-run spread. It stays opt-in.
 - Details: [docs/RESULTS-v0.1.md](docs/RESULTS-v0.1.md),
   [docs/RESULTS-v0.2.md](docs/RESULTS-v0.2.md),
