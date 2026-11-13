@@ -10,15 +10,17 @@ An opt-in Apple Metal backend for one numerical operation used by VASP 6.6.1
 `vasp_std` on Apple Silicon: complex matrix multiplication through the public
 reference-BLAS interface `ZGEMM`. The backend is attached at link time; the
 licensed VASP objects are relinked privately and never leave the local machine.
+Since v0.5 the same library also forwards VASP's DGEMV, DGEMM and FFTW calls, to
+profile them and to offer two opt-in CPU-side routes.
 
 ## Status
 
-| | v0.1 (`d3be811`) | v0.2 (final safety fix `afb272e`) | v0.3 (merged, untagged) | v0.4 (unreleased) |
-| --- | --- | --- | --- | --- |
-| Standalone correctness | verified | **passed** at `afb272e`: 138 C cases, 12 Fortran ABI calls, 15 run-comparison cases | numerical gates unchanged and passing; per-rank report and aggregation tests added | numerical gates unchanged and passing; census, profile and relaxation-comparison tests added |
-| Private relink | verified | verified (link only, `0344fdb` build) | link-only relink on the Mac mini with the port's toolchain convention | link-only relink on the MacBook (M3 Max) |
-| VASP integration | **verified** on Si2: 802/802 GPU results consumed, same TOTEN | **verified on the earlier `0344fdb` build** (Si2: 802/802 consumed, 0 shadow failures, 0 range fallbacks, same TOTEN); **`afb272e` not VASP-tested** | 16-rank managed qualification: see [docs/RESULTS-v0.3.md](docs/RESULTS-v0.3.md) | TiO2 at 8 ranks, two series: PBE relaxation and single point with forced GPU results VASP-verified (4.9M and 1.0M calls, 0 shadow failures); HSE06 single point measured on the CPU only: see [docs/RESULTS-v0.4.md](docs/RESULTS-v0.4.md) |
-| VASP performance acceleration | not established | **not established**; synthetic benchmarks exploratory only (busy host) | **not established** | **not established**: no TiO2 ZGEMM call reaches the GPU-win region; forcing ZGEMM onto the GPU is 2.6× slower end to end with PBE, and ZGEMM is 0.008% of rank time with HSE06 |
+| | v0.1 (`d3be811`) | v0.2 (final safety fix `afb272e`) | v0.3 (merged, untagged) | v0.4 (merged, untagged) | v0.5 (unreleased) |
+| --- | --- | --- | --- | --- | --- |
+| Standalone correctness | verified | **passed** at `afb272e`: 138 C cases, 12 Fortran ABI calls, 15 run-comparison cases | numerical gates unchanged and passing; per-rank report and aggregation tests added | numerical gates unchanged and passing; census, profile and relaxation-comparison tests added | numerical gates unchanged; forwarding, profiling, plan-cache, Accelerate-route and fixed-work comparison tests added |
+| Private relink | verified | verified (link only, `0344fdb` build) | link-only relink on the Mac mini with the port's toolchain convention | link-only relink on the MacBook (M3 Max) | link-only relink on the MacBook (M3 Max) |
+| VASP integration | **verified** on Si2: 802/802 GPU results consumed, same TOTEN | **verified on the earlier `0344fdb` build** (Si2: 802/802 consumed, 0 shadow failures, 0 range fallbacks, same TOTEN); **`afb272e` not VASP-tested** | 16-rank managed qualification: see [docs/RESULTS-v0.3.md](docs/RESULTS-v0.3.md) | TiO2 at 8 ranks, two series: PBE relaxation and single point with forced GPU results VASP-verified (4.9M and 1.0M calls, 0 shadow failures); HSE06 single point measured on the CPU only: see [docs/RESULTS-v0.4.md](docs/RESULTS-v0.4.md) | TiO2 at 8 ranks: DGEMV/DGEMM on Accelerate `CPU A/B consistent` with OpenBLAS on the HSE06 fixed-work case (\|dTOTEN\|/N_atoms 7.5e-9 eV/atom): see [docs/RESULTS-v0.5.md](docs/RESULTS-v0.5.md) |
+| VASP performance acceleration | not established | **not established**; synthetic benchmarks exploratory only (busy host) | **not established** | **not established**: no TiO2 ZGEMM call reaches the GPU-win region; forcing ZGEMM onto the GPU is 2.6× slower end to end with PBE, and ZGEMM is 0.008% of rank time with HSE06 | **CPU-side only, opt-in**: DGEMV/DGEMM on Accelerate is 1.76× faster end to end on the TiO2 HSE06 fixed-work case (one pair; reverse-order pair and PBE pending). No GPU speedup |
 
 **Companion repositories.** Relinking and managed runs use the VASP port
 [angzeli/vasp-6.6.1-macos-arm64-port](https://github.com/angzeli/vasp-6.6.1-macos-arm64-port)
@@ -43,6 +45,11 @@ v0.4 measures a realistic system, anatase TiO2 on an M3 Max, in two parallel ser
 **HSE06** (a hybrid single point on the same cell). It adds a shape census, a profile
 attribution tool and a GPU-sharing benchmark. Results are in
 [docs/RESULTS-v0.4.md](docs/RESULTS-v0.4.md).
+
+v0.5 times DGEMV, DGEMM and FFTW call by call on every rank. It adds two opt-in
+CPU-side routes: DGEMV/DGEMM on Accelerate (`VMB_DBLAS_LIBRARY`), and an FFTW plan
+cache (`VMB_FFTW_PLAN_CACHE`, not yet measured on VASP). Results are in
+[docs/RESULTS-v0.5.md](docs/RESULTS-v0.5.md).
 
 - **Correctness is not speedup.** The verified Si2 integrations show that GPU
   results can feed a converging SCF without changing the energy. At those sizes
@@ -76,9 +83,16 @@ attribution tool and a GPU-sharing benchmark. Results are in
     end to end, from about 0.56 ms per call with 8 ranks sharing the GPU.
   - With HSE06, ZGEMM is 0.008% of rank time.
   - FFTW is 38–41% of busy time in both series, and the HSE06 exchange DGEMV 29–32%.
+- **The CPU libraries are the lever (v0.5).** Call timers on all ranks give:
+  - HSE06 (fixed work): DGEMV 40%, DGEMM 7.5%, FFTW 31% (6.1% of it planning).
+  - PBE: DGEMV 17%, FFTW 38%.
+  - Routing DGEMV/DGEMM to Accelerate makes the HSE06 case 1.76× faster end to end,
+    with results within OpenBLAS's own run-to-run spread. It stays opt-in.
 - Details: [docs/RESULTS-v0.1.md](docs/RESULTS-v0.1.md),
   [docs/RESULTS-v0.2.md](docs/RESULTS-v0.2.md),
-  [docs/RESULTS-v0.4.md](docs/RESULTS-v0.4.md). Default mode is off.
+  [docs/RESULTS-v0.4.md](docs/RESULTS-v0.4.md),
+  [docs/RESULTS-v0.5.md](docs/RESULTS-v0.5.md). Default mode is off, and every
+  default build still uses OpenBLAS and plain FFTW.
 
 ## How it works
 
@@ -130,6 +144,10 @@ the run reports per-phase medians and quartiles.
 - `--concurrency N` (1–8) starts N replicas, each with one CPU thread, behind a
   start barrier, to model N ranks sharing one GPU.
 
+`build/blas_replay replay|batch SHAPES.tsv --lib openblas|accelerate --output NEW.tsv`
+times observed DGEMV/DGEMM shapes with one thread, warm or with a cold matrix pool
+(`--cold-mb`), against an exact reference.
+
 ## Use with a private VASP build
 
 ```sh
@@ -148,6 +166,9 @@ group, no retries.
 - `--allow-warn-pressure` is an explicit override for WARN-level pressure only.
 - `scripts/compare_runs.py OFF_DIR ON_DIR` classifies a pair as VASP-verified,
   CPU-only consistent or FAILED. It also compares ionic relaxations.
+  - `--fixed-work` compares single points capped at exactly NELM electronic steps.
+  - Two off-mode runs that agree are classed CPU A/B consistent (exit 4), as for an
+    A/B of `VMB_DBLAS_LIBRARY`.
 - `scripts/vmb_shapes.py census RUN_DIR --output OUT.json` merges a managed run's
   per-rank telemetry into one shape census. It reconciles the calls with the attempt
   evidence and bounds the share of rank time a region rule could save.
@@ -164,6 +185,9 @@ group, no retries.
 | `VMB_REPORT_DIR` | none | v0.3 per-rank route: private directory receiving one claim and one report per rank |
 | `VMB_ATTEMPT_ID` | none | required with `VMB_REPORT_DIR`; binds every report to one attempt |
 | `VMB_EXPECT_WORLD_SIZE` | none | optional; must equal the launcher's world size |
+| `VMB_PROFILE` | `0` | v0.5: `1` times DGEMV, DGEMM and FFTW per shape into `rank-RRRRR.profile.json`; `reuse` adds the DGEMV reuse probe. Build default `PROFILE_DEFAULT` |
+| `VMB_DBLAS_LIBRARY` | `openblas` | v0.5: `accelerate` sends `dgemv_` and `dgemm_` to Accelerate (results may differ in the last bits). Build default `DBLAS_ACCELERATE_DEFAULT` |
+| `VMB_FFTW_PLAN_CACHE` | `0` | v0.5: `1` reuses repeated FFTW_ESTIMATE 3D plans (not yet measured on VASP). Build default `PLAN_CACHE_DEFAULT` |
 | `VMB_MIN_WORK` | 0 | minimum m·n·k sent to the GPU |
 | `VMB_MAX_WORK` | 2^34 | maximum m·n·k sent to the GPU |
 | `VMB_MAX_BYTES` | 2^30 | maximum packed buffer size |
@@ -175,9 +199,14 @@ group, no retries.
 - `build/test_fortran_abi`: 12 calls, against a quad-precision oracle.
 - `tests/test_rank_reports.py`: 16 cases (per-rank route, aggregation and v0.4
   timing fields).
-- `tests/test_vmb_shapes.py`: 5 cases (census).
-- `tests/test_vmb_profile.py`: 2 cases.
-- `tests/test_compare_runs.py`: 23 cases (single-rank, multi-rank and relaxation).
+- `build/test_blas_fftw`: DGEMV/DGEMM/FFTW forwarding, profiling, plan cache and
+  Accelerate route (v0.5).
+- `tests/test_profile_route.py`: 13 cases (v0.5 profile, cache and library
+  declarations).
+- `tests/test_vmb_shapes.py`: 6 cases (census).
+- `tests/test_vmb_profile.py`: 3 cases.
+- `tests/test_compare_runs.py`: 27 cases (single-rank, multi-rank, relaxation,
+  fixed-work and CPU A/B).
 
 All pass. The tolerance per element, fixed before testing, is
 `1e-18·max S + 8(k+2)·2^-48·S_ij`.
@@ -204,8 +233,8 @@ Repeated GPU calls are bitwise deterministic.
 
 ## Limitations
 
-- One operation (ZGEMM). VASP integration has been tested only on one tiny
-  system (Si2).
+- One GPU operation (ZGEMM), with no measured VASP win. The v0.5 CPU-side routes
+  have been measured on one system (TiO2) only.
 - The per-rank route supports Open MPI launches only; other launchers are not
   yet scoped. The literal `VMB_REPORT` and `VMB_TELEMETRY` paths remain
   single-process only.
