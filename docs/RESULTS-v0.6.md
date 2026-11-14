@@ -10,7 +10,7 @@ library-level work the GPU can win).
 | --- | --- |
 | Can VASP be linked directly against Accelerate? (#9) | **Yes, with two fixes.** `zdotc_`/`cdotc_` crash (f2c convention) and need a shim; and with Open MPI's flat namespace, Accelerate must load before ScaLAPACK, or VASP silently runs OpenBLAS (§2) |
 | Direct link against the interposer route (#9) | *Pending (phase C)* |
-| Converged HSE06, time to solution (#10) | *Pending (phase B)* |
+| Converged HSE06, time to solution (#10) | **1.51× faster on the Accelerate route** (14.5 h → 9.6 h). Both converge in 12 SCF steps to the same energy, forces and band edges: `CPU A/B consistent`. Per the decision rule, Accelerate becomes the default for DGEMV/DGEMM (§3) |
 | FFTW plan cache (#8) | Works (294,576 hits, 16 misses per PBE run, results bit-identical); PBE timing inconclusive on a busy host (§4). HSE06 *pending (phase B)* |
 | FFTW built with NEON | Homebrew's FFTW has no SIMD on Apple Silicon. A NEON build executes VASP's transforms **1.29× faster** (HSE06 shapes), 1.26× (PBE), with the same accuracy (§5). End to end *pending (phase D)* |
 
@@ -83,8 +83,46 @@ within 1e-5 kB: `CPU A/B consistent` (`compare_runs.py --no-backend on`).
 
 ## 3. Converged HSE06, time to solution
 
-*Pending (phase B, T1 and T2).* Same inputs as v0.4 H1/H1b (EDIFF 1e-6), restarted
-from the v0.4 PBE single point's WAVECAR. In v0.4 on OpenBLAS this took 13 SCF steps.
+TiO2 HSE06 single point run to convergence (EDIFF 1e-6, NELM 100), with the inputs
+of v0.4 H1/H1b, restarted from the v0.4 PBE single point's WAVECAR. 8 ranks. One
+pair, run back to back on 13–14 Nov: T1 on OpenBLAS (`v06a-off`), then T2 on the
+Accelerate route (`v06a-accel`, DGEMV/DGEMM to Accelerate). The two binaries are
+built from v0.5.0 and differ only in `DBLAS_ACCELERATE_DEFAULT`.
+
+| | T1, OpenBLAS | T2, Accelerate route | Speedup |
+| --- | --- | --- | --- |
+| **Time to solution (LOOP+)** | **52,056 s (14.5 h)** | **34,433 s (9.6 h)** | **1.51×** |
+| SCF steps to convergence | 12 | 12 | |
+| Per SCF step (mean; range) | 3,806 s (3,801–3,825) | 2,636 s (2,634–2,640) | 1.44× |
+| SCF loop, total | 45,668 s | 31,638 s | 1.44× |
+| After SCF (exact-exchange forces) | 6,388 s | 2,796 s | 2.28× |
+| Final TOTEN | −132.28535600 eV | −132.28535598 eV | |
+| VBM / CBM / gap | 0.8696 / 4.4226 / 3.5530 eV | 0.8696 / 4.4226 / 3.5530 eV | |
+
+- **Results agree.** `compare_runs.py` classes the pair `CPU A/B consistent`:
+  - |dTOTEN|/N_atoms = 1.7e-9 eV/atom;
+  - forces identical (max |dF| = 0);
+  - both runs show 927,780 BLAS calls, complete evidence on all 8 ranks, and the
+    library recorded per rank.
+
+  The energies agree to about 1e-8 eV at every SCF step, so the two runs follow the
+  same SCF path.
+- **Why 1.51× and not v0.5's 1.76×.** v0.5's runs stopped after 2 SCF steps, so the
+  forces, where Accelerate gains most (2.3×), were a larger share of the time. A
+  converged run is 88% SCF steps on OpenBLAS, where the gain is 1.44×. The parts
+  agree with v0.5: 1.46× per step and 2.31–2.32× on the forces there.
+- **Against v0.4.** The same calculation on OpenBLAS took 13 SCF steps over two runs
+  (H1, H1b), about 15.7 h. T1 converged in one run, in 12 steps.
+- **Host.** Every SCF step lies within 0.7% of its run's mean, so neither run was
+  disturbed. The 1-minute load of 8.9 recorded at T2's launch is T1's 8 ranks, which
+  had just exited, still in the average.
+- **Decision.** Both runs converge, the step counts are equal and the pair is
+  `CPU A/B consistent`, so the rule in §1 applies: **Accelerate becomes the default
+  for DGEMV/DGEMM.** The default changes in the code at release, together with the
+  other v0.6 decisions.
+- **Limits.** One pair, not ABBA (four converged runs would take about 48 h). Run
+  order is covered by the fixed-work pairs (v0.5, and K1–K4 here). Stress is not in
+  the output of this case, so it was not compared.
 
 ## 4. FFTW plan cache (#8)
 
