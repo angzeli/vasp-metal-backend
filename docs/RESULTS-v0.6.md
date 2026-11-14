@@ -14,6 +14,19 @@ library-level work the GPU can win).
 | FFTW plan cache (#8) | Works (294,576 hits, 16 misses per PBE run, results bit-identical); PBE timing inconclusive on a busy host (§4). HSE06 *pending (phase B)* |
 | FFTW built with NEON | Homebrew's FFTW has no SIMD on Apple Silicon. A NEON build executes VASP's transforms **1.29× faster** (HSE06 shapes), 1.26× (PBE), with the same accuracy (§5). End to end *pending (phase D)* |
 
+**Scope, frozen on 14 Nov 2026** (during phase B, before any phase B–D pair had
+finished):
+
+- **Headline results: four decisions.** The converged HSE06 pair (T1/T2), the plan
+  cache on HSE06 (K1–K4), direct Accelerate against the interposer route on HSE06
+  (M1–M4), and NEON FFTW on HSE06 (G1–G4). The PBE pairs back these up.
+- **Supporting data only.** The quiet PBE plan-cache rerun (Q1–Q6) and the
+  8-process BLAS replay run because they were already queued, but no decision
+  depends on them.
+- **No new experiments in v0.6,** whatever the results suggest. In particular, a
+  converged HSE06 run on the direct binary, if direct linking wins, moves to v0.7.
+  So do ScaLAPACK built on Accelerate and a second system.
+
 ## 1. Decision rules (fixed before the timed runs)
 
 - **Direct Accelerate (D) against the interposer route (I),** HSE06 fixed work, D I I D:
