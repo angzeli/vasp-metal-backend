@@ -50,7 +50,8 @@ LIBS      = $(BUILD)/libvmb.a -framework Metal -framework Foundation -lobjc \
 
 .PHONY: all test test-python bench clean FORCE
 all: $(BUILD)/libvmb.a $(BUILD)/test_zgemm $(BUILD)/test_fortran_abi $(BUILD)/shape_replay \
-     $(BUILD)/rank_probe $(BUILD)/test_blas_fftw $(BUILD)/blas_replay
+     $(BUILD)/rank_probe $(BUILD)/test_blas_fftw $(BUILD)/blas_replay \
+     $(BUILD)/test_accelerate_abi $(BUILD)/fftw_replay
 
 $(BUILD):
 	mkdir -p $@
@@ -102,6 +103,21 @@ $(BUILD)/shape_replay: bench/shape_replay.c $(BUILD)/libvmb.a
 $(BUILD)/blas_replay: bench/blas_replay.c | $(BUILD)
 	$(CC) $(CFLAGS) $< -L$(OPENBLAS)/lib -lopenblas -o $@
 
+# ABI of the value-returning BLAS/LAPACK functions VASP imports, against
+# Accelerate as a directly linked VASP sees it (#9): Accelerate first, with the
+# complex-dot shim. Each function runs as its own process; see the test.
+ABI_FUNCTIONS = ddot dasum dnrm2 dzasum zlange idamax izamax ilaenv zdotc cdotc
+$(BUILD)/accelerate-shim.o: scripts/accelerate-shim.c | $(BUILD)
+	$(CC) $(CFLAGS) -c $< -o $@
+
+$(BUILD)/test_accelerate_abi: tests/test_accelerate_abi.f90 $(BUILD)/accelerate-shim.o
+	$(FC) $(FFLAGS) -J$(BUILD) -Wl,-framework,Accelerate $< $(BUILD)/accelerate-shim.o -o $@
+
+# FFT replay on VASP's shapes: loads the libfftw3 under test by path, so one
+# binary compares builds (v0.6, NEON against Homebrew's scalar build).
+$(BUILD)/fftw_replay: bench/fftw_replay.c | $(BUILD)
+	$(CC) $(CFLAGS) $< -o $@
+
 # Harmless per-rank report fixture: calls zgemm_ only on chosen ranks.
 $(BUILD)/rank_probe: tests/rank_probe.c $(BUILD)/libvmb.a
 	$(CC) $(CFLAGS) $< $(LIBS) -o $@
@@ -115,6 +131,8 @@ test: all
 	$(BUILD)/test_zgemm
 	$(BUILD)/test_fortran_abi
 	$(BUILD)/test_blas_fftw
+	@for f in $(ABI_FUNCTIONS); do $(BUILD)/test_accelerate_abi $$f | grep -q ' ok' \
+	    || { echo "Accelerate ABI: $$f failed"; exit 1; }; done; echo "Accelerate ABI: all ok"
 	python3 -B tests/test_profile_route.py
 	python3 -B tests/test_rank_reports.py
 	python3 -B tests/test_vmb_shapes.py

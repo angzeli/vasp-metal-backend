@@ -157,6 +157,20 @@ class CompareRunsTest(unittest.TestCase):
         res = compare_runs.compare(self.root / 'off', self.root / 'on')
         self.assertFails(res, 'report missing')
 
+    def test_declared_no_backend(self):
+        self.run_pair(on={'report': OFF_REPORT})
+        (self.root / 'on' / 'vmb-report.txt').unlink()
+        res = compare_runs.compare(self.root / 'off', self.root / 'on', no_backend='on')
+        self.assertEqual(res['verdict'], 'CPU A/B consistent', res['problems'])
+        res = compare_runs.compare(self.root / 'on', self.root / 'off', no_backend='off')
+        self.assertEqual(res['verdict'], 'CPU A/B consistent', res['problems'])
+        self.assertFails(compare_runs.compare(self.root / 'off', self.root / 'on'), 'report missing')
+
+    def test_declared_no_backend_with_report_fails(self):
+        res = self.run_pair(on={'report': OFF_REPORT})
+        res = compare_runs.compare(self.root / 'off', self.root / 'on', no_backend='on')
+        self.assertFails(res, 'declared without a backend')
+
     def test_v01_report_format(self):
         v01 = {k: v for k, v in GOOD_REPORT.items() if k != 'vmb.mode'}
         v01['vmb.enabled'] = '1'

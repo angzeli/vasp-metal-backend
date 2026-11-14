@@ -24,6 +24,10 @@ are aggregated by scripts/vmb_evidence.py, the one acceptance model. Classes:
 convergence when it made exactly NELM steps, and both runs must make the same
 number. Not accepted for ionic relaxations.
 
+--no-backend off|on: that run is declared to carry no backend, e.g. VASP linked
+directly against a BLAS (v0.6, #9). It must have no backend report at all, and
+counts as an off-mode run, so the pair can be CPU A/B consistent.
+
 Exit status: 0 VASP-verified, 3 CPU-only consistent, 4 CPU A/B consistent, 1 FAILED.
 """
 import argparse
@@ -181,7 +185,10 @@ def counters(rep):
             'ratio': float(rep.get('vmb.max_check_ratio', 'nan'))}
 
 
-def check_run(name, r, fixed_work=False):
+NO_BACKEND = {'mode': 'none', 'consumed': 0, 'submitted': 0}
+
+
+def check_run(name, r, fixed_work=False, no_backend=False):
     p = []
     if r['exit'] != '0' or r['reason'] != 'completed':
         p.append(f'{name}: abnormal exit (exit={r["exit"]}, reason={r["reason"]})')
@@ -208,6 +215,13 @@ def check_run(name, r, fixed_work=False):
         p.append(f'{name}: non-finite force component')
     if r['stress'] is not None and not all(math.isfinite(x) for x in r['stress']):
         p.append(f'{name}: non-finite stress component')
+    if no_backend:
+        if r['evidence'] is not None and r['evidence']['ranks_reported']:
+            p.append(f"{name}: declared without a backend, but {len(r['evidence']['ranks_reported'])} "
+                     'ranks reported')
+        elif r['report']:
+            p.append(f'{name}: declared without a backend, but has a backend report')
+        return p, NO_BACKEND
     if r['evidence'] is not None:
         ev = r['evidence']
         c = counters_multi(ev)
@@ -243,18 +257,18 @@ def check_run(name, r, fixed_work=False):
     return p, c
 
 
-def compare(off_dir, on_dir, fixed_work=False):
+def compare(off_dir, on_dir, fixed_work=False, no_backend=None):
     off, on = parse(off_dir), parse(on_dir)
     problems = []
-    p_off, c_off = check_run('off', off, fixed_work)
-    p_on, c_on = check_run('on', on, fixed_work)
+    p_off, c_off = check_run('off', off, fixed_work, no_backend == 'off')
+    p_on, c_on = check_run('on', on, fixed_work, no_backend == 'on')
     problems += p_off + p_on
     if fixed_work and off['iterations'] != on['iterations']:
         problems.append(f"electronic step counts differ ({off['iterations']} vs {on['iterations']})")
     mismatched = [n for n in INPUTS if off['digests'][n] is None or off['digests'][n] != on['digests'][n]]
     if mismatched:
         problems.append('inputs differ or missing: ' + ', '.join(mismatched))
-    if c_off and (c_off['mode'] != 'off' or c_off['consumed'] or c_off['submitted']):
+    if c_off and (c_off['mode'] not in ('off', 'none') or c_off['consumed'] or c_off['submitted']):
         problems.append('off-run used the GPU or was not in off mode')
     delta = fdiff = math.nan
     if off['toten'] is not None and on['toten'] is not None and off['natoms']:
@@ -288,7 +302,7 @@ def compare(off_dir, on_dir, fixed_work=False):
         verdict = 'VASP-verified'
     elif c_on and c_on['mode'] == 'auto':
         verdict = 'CPU-only consistent'
-    elif c_on and c_on['mode'] == 'off' and not c_on['consumed'] and not c_on['submitted']:
+    elif c_on and c_on['mode'] in ('off', 'none') and not c_on['consumed'] and not c_on['submitted']:
         verdict = 'CPU A/B consistent'
     else:
         verdict = 'FAILED'
@@ -298,14 +312,16 @@ def compare(off_dir, on_dir, fixed_work=False):
             'fixed_work': fixed_work, 'verdict': verdict, 'problems': problems}
 
 
-def main(off_dir, on_dir, fixed_work=False):
-    res = compare(off_dir, on_dir, fixed_work)
+def main(off_dir, on_dir, fixed_work=False, no_backend=None):
+    res = compare(off_dir, on_dir, fixed_work, no_backend)
     for name in ('off', 'on'):
         r, c = res[name], res['c_' + name]
         print(f'{name}: exit={r["exit"]} TOTEN={r["toten"]} eV iterations={r["iterations"]} '
               f'converged={r["converged"]} normal_end={r["normal_end"]} forces={len(r["forces"])} '
               f'NBANDS={r["nbands"]}')
-        if c:
+        if c is NO_BACKEND:
+            print(f'{name}: no backend (declared)')
+        elif c:
             s = c['statuses']
             print(f'{name}: mode={c["mode"]} calls={c["calls"]} submitted={c["submitted"]} '
                   f'completed={c["completed"]} consumed={c["consumed"]} cpu_calls={c["cpu"]} '
@@ -338,7 +354,9 @@ if __name__ == '__main__':
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument('--fixed-work', action='store_true',
                     help='single points capped at exactly NELM steps, compared at equal work')
+    ap.add_argument('--no-backend', choices=('off', 'on'),
+                    help='that run carries no backend (VASP linked directly against a BLAS)')
     ap.add_argument('off_dir')
     ap.add_argument('on_dir')
     a = ap.parse_args()
-    sys.exit(main(a.off_dir, a.on_dir, a.fixed_work))
+    sys.exit(main(a.off_dir, a.on_dir, a.fixed_work, a.no_backend))
